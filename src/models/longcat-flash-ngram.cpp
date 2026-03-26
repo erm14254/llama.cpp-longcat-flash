@@ -14,7 +14,7 @@ llm_build_longcat_flash_ngram::llm_build_longcat_flash_ngram(
 
     const int64_t n_embd_head_k = hparams.n_embd_head_k_mla();
 
-    const int64_t n_embd_head_qk_rope = hparams.n_rot;
+    const int64_t n_embd_head_qk_rope = hparams.n_rot();
     const int64_t n_embd_head_qk_nope = n_embd_head_k - n_embd_head_qk_rope;
 
     const uint32_t kv_lora_rank = hparams.n_lora_kv;

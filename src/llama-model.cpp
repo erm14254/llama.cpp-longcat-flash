@@ -5447,14 +5447,13 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
                     const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla();
 
-                    const int64_t n_embd_head_qk_rope = hparams.n_rot;
+                    const int64_t n_embd_head_qk_rope = hparams.n_rot();
                     const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
 
                     const int64_t q_lora_rank  = hparams.n_lora_q;
                     const int64_t kv_lora_rank = hparams.n_lora_kv;
 
                     const int64_t n_ff_exp        = hparams.n_ff_exp;
-                    const int64_t n_expert_shared = hparams.n_expert_shared;
 
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
 
