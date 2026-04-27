@@ -189,7 +189,7 @@ llm_build_longcat_flash_ngram::llm_build_longcat_flash_ngram(
             cb(Vcur, "Vcur", il);
 
             cur = build_attn(inp_attn_k,
-                    model.layers[il].wo, NULL,
+                    model.layers[il].wo, NULL, model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
         }
 
