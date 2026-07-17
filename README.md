@@ -7,7 +7,7 @@ Standard upstream llama.cpp builds cannot currently load these GGUF files.
 
 Implementation branch: longcat-mtp
 
-![llama](llama-longcat-v2" src="https://github.com/user-attachments/assets/68cd2497-6e54-4c23-b133-3ef318b6056b)
+![llama](https://github.com/user-attachments/assets/68cd2497-6e54-4c23-b133-3ef318b6056b)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
