@@ -35,7 +35,7 @@ cd llama.cpp-longcat-flash
   --spec-draft-n-max 1 `
   --spec-draft-n-min 1 `
   --spec-draft-p-min 0
-  </code
+</code>
 
 ## Recent API changes
 
