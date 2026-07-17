@@ -11,8 +11,8 @@ Implementation branch: longcat-mtp
 
 ## How to Install This Fork
 
-git clone https://github.com/erm14254/llama.cpp-longcat-flash.git
-cd llama.cpp-longcat-flash
+<code>git clone https://github.com/erm14254/llama.cpp-longcat-flash.git
+cd llama.cpp-longcat-flash</code>
 
 ## How to Load GGUF Model with MTPs for the llama-ui server:
 
