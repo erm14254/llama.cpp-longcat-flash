@@ -5,10 +5,9 @@ native one-layer MTP speculative decoder.
 
 Standard upstream llama.cpp builds cannot currently load these GGUF files.
 
-Implementation branch:
-longcat-mtp
+Implementation branch: longcat-mtp
 
-![llama]("https://github.com/user-attachments/assets/712c907f-6c6c-4e80-bd42-d638a0c51a72")
+![llama](https://github.com/user-attachments/assets/712c907f-6c6c-4e80-bd42-d638a0c51a72)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
