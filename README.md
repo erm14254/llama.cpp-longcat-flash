@@ -1,4 +1,12 @@
-# llama.cpp
+# llama.cpp — LongCat Flash Ngram / Native MTP Fork
+
+This standalone fork adds support for LongCat Flash Ngram models and their
+native one-layer MTP speculative decoder.
+
+Standard upstream llama.cpp builds cannot currently load these GGUF files.
+
+Implementation branch:
+longcat-mtp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
