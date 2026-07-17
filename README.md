@@ -21,15 +21,13 @@ LLM inference in C/C++
 
 ## How to Install This Fork
 
-<code>
-git clone https://github.com/erm14254/llama.cpp-longcat-flash.git
+<code>git clone https://github.com/erm14254/llama.cpp-longcat-flash.git
 cd llama.cpp-longcat-flash
 </code>
 
 ## How to Load GGUF Model with MTPs for the llama-ui server:
 
-<code>
-.\build\bin\Release\llama-server.exe `
+<code>.\build\bin\Release\llama-server.exe `
   --model D:\models\LongCat-Flash-Lite-Native-MTP-bf16-00001-of-00007.gguf `
   --spec-type draft-mtp `
   --spec-draft-n-max 1 `
