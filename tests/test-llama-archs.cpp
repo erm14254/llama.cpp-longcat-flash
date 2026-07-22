@@ -152,13 +152,19 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         }
         ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT, n_head_per_layer);
         ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT_KV, n_head_per_layer);
+    } else if (arch == LLM_ARCH_MINIMAX_M3) {
+        ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT, n_head);
+        ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT_KV, uint32_t(1));
     } else {
         ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT, n_head);
         ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT_KV, n_head);
     }
 
     ms.add_kv(LLM_KV_ATTENTION_MAX_ALIBI_BIAS, 8.0f);
-    if (arch == LLM_ARCH_DEEPSEEK2
+    if (arch == LLM_ARCH_MINIMAX_M3) {
+        ms.add_kv(LLM_KV_ATTENTION_KEY_LENGTH,       n_embd_head);
+        ms.add_kv(LLM_KV_ATTENTION_VALUE_LENGTH,     n_embd_head);
+    } else if (arch == LLM_ARCH_DEEPSEEK2
             || arch == LLM_ARCH_DEEPSEEK32
             || arch == LLM_ARCH_GLM_DSA
             || arch == LLM_ARCH_KIMI_LINEAR
@@ -199,8 +205,10 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     }
 
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT, uint32_t(1));
-    ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, uint32_t(64));
+    ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, n_embd_head);
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,      uint32_t(8));
+    ms.add_kv(LLM_KV_ATTENTION_INDEXER_BLOCK_SIZE, uint32_t(1));
+    ms.add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS, uint32_t(1));
     ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
     ms.add_kv(LLM_KV_TOKENIZER_MODEL,         "no_vocab");
     // ms.add_kv(LLM_KV_DENSE_2_FEAT_OUT,     n_embd);
@@ -355,6 +363,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_LLADA_MOE:
         case LLM_ARCH_GROVEMOE:
         case LLM_ARCH_MINIMAX_M2:
+        case LLM_ARCH_MINIMAX_M3:
         case LLM_ARCH_RND1:
         case LLM_ARCH_PADDLEOCR:
         case LLM_ARCH_MIMO2:
@@ -362,6 +371,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_STEP35:
         case LLM_ARCH_MISTRAL4:
         case LLM_ARCH_MELLUM:
+        case LLM_ARCH_LAGUNA:
             return true;
         default:
             return false;
@@ -417,6 +427,9 @@ static bool arch_supported(const llm_arch arch) {
     }
     if (arch == LLM_ARCH_DEEPSEEK4) {
         return false;
+    }
+    if (arch == LLM_ARCH_MINIMAX_M3) {
+        return false; // TODO no-weight MSA graph fixture
     }
 
     // FIXME some models are segfaulting with WebGPU:
