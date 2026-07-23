@@ -1,7 +1,12 @@
+#include "llama-graph.h"
 #include "testing.h"
+
+#include "ggml-backend.h"
+#include "ggml-cpu.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -101,8 +106,74 @@ static void test_router(testing & t) {
     t.assert_true("multiple token batch identity contribution", identity > 7.0);
 }
 
+static route_result run_production_route(
+        const std::vector<float> & logits_data,
+        const std::vector<float> & bias_data) {
+    struct ggml_init_params params = {
+        /* .mem_size   = */ 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ false,
+    };
+    ggml_context * ctx = ggml_init(params);
+    GGML_ASSERT(ctx != nullptr);
+
+    ggml_tensor * logits = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 5, 1);
+    ggml_tensor * bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 5);
+    auto route = llm_graph_build_longcat_moe_route(ctx, logits, bias, 1, 3, 5, 2, 6.0f);
+
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 32, false);
+    ggml_build_forward_expand(gf, route.selected_experts);
+    ggml_build_forward_expand(gf, route.selected_real);
+    ggml_build_forward_expand(gf, route.weights_real);
+    ggml_build_forward_expand(gf, route.identity_weight_sum);
+
+    memcpy(logits->data, logits_data.data(), logits_data.size() * sizeof(float));
+    memcpy(bias->data, bias_data.data(), bias_data.size() * sizeof(float));
+    ggml_graph_compute_with_ctx(ctx, gf, 1);
+
+    const int32_t * selected = (const int32_t *) route.selected_experts->data;
+    const int32_t * selected_real = (const int32_t *) route.selected_real->data;
+    const float * weights_real = (const float *) route.weights_real->data;
+    const float * identity_sum = (const float *) route.identity_weight_sum->data;
+
+    route_result res;
+    for (int i = 0; i < 2; ++i) {
+        res.ids.push_back(selected[i]);
+        if (selected[i] < 3) {
+            res.real += weights_real[i];
+        }
+        GGML_ASSERT(selected[i] < 3 || selected_real[i] == 0);
+        GGML_ASSERT(selected[i] < 3 || weights_real[i] == 0.0f);
+    }
+    res.identity = identity_sum[0];
+
+    ggml_free(ctx);
+    return res;
+}
+
+static void test_production_route_helper(testing & t) {
+    const std::vector<float> no_bias = { 0, 0, 0, 0, 0 };
+
+    const auto identity = run_production_route({ 0, 0, 0, 5, 4 }, no_bias);
+    t.assert_true("production route selects identity first", identity.ids[0] >= 3);
+    t.assert_true("production route selects identity second", identity.ids[1] >= 3);
+    t.assert_true("identity selections have zero real contribution", near(0.0, identity.real));
+    t.assert_true("identity selected mass scaled once", near(5.912626155935248, identity.identity));
+
+    const auto mixed = run_production_route({ 5, 0, 0, 4, 0 }, no_bias);
+    t.assert_true("production route mixed real", mixed.ids[0] < 3 || mixed.ids[1] < 3);
+    t.assert_true("production route mixed identity", mixed.ids[0] >= 3 || mixed.ids[1] >= 3);
+    t.assert_true("mixed real contribution", near(4.3224760735286125, mixed.real));
+    t.assert_true("mixed identity contribution excludes unselected", near(1.590150082406636, mixed.identity));
+
+    const auto biased = run_production_route({ 0, 4, 3, 0, 0 }, { 0, 0, 0, 10, 0 });
+    t.assert_true("production route bias selects identity", biased.ids[0] >= 3 || biased.ids[1] >= 3);
+    t.assert_true("bias does not alter selected weights", near(0.07723629290886723, biased.identity));
+}
+
 int main() {
     testing t(std::cout);
     t.test("longcat router", test_router);
+    t.test("longcat production route helper", test_production_route_helper);
     return t.summary();
 }

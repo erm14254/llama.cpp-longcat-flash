@@ -1172,6 +1172,51 @@ bool llm_graph_input_sampling::can_reuse(const llm_graph_params & params) {
     return true;
 }
 
+
+llm_graph_longcat_moe_route llm_graph_build_longcat_moe_route(
+        ggml_context * ctx,
+        ggml_tensor * logits,
+        ggml_tensor * correction_bias,
+        int64_t n_tokens,
+        int32_t n_expert_real,
+        int32_t n_expert_total,
+        int32_t n_expert_used,
+        float expert_weights_scale) {
+    llm_graph_longcat_moe_route res;
+
+    res.probs = ggml_soft_max(ctx, logits);
+    res.selection_probs = res.probs;
+    if (correction_bias) {
+        res.selection_probs = ggml_add(ctx, res.probs, correction_bias);
+    }
+
+    res.selected_experts = ggml_argsort_top_k(ctx, res.selection_probs, n_expert_used);
+
+    ggml_tensor * probs_3d = ggml_reshape_3d(ctx, res.probs, 1, n_expert_total, n_tokens);
+    res.weights = ggml_get_rows(ctx, probs_3d, res.selected_experts);
+    res.weights = ggml_scale(ctx, res.weights, expert_weights_scale);
+
+    ggml_tensor * selected_experts_f = ggml_cast(ctx, res.selected_experts, GGML_TYPE_F32);
+    ggml_tensor * identity_mask = ggml_step(ctx,
+        ggml_add(ctx, selected_experts_f, ggml_new_f32(ctx, 0.5f - (float) n_expert_real)));
+    ggml_tensor * real_mask = ggml_add(ctx,
+        ggml_scale(ctx, identity_mask, -1.0f), ggml_new_f32(ctx, 1.0f));
+
+    res.identity_weight_sum = ggml_sum_rows(ctx,
+        ggml_reshape_2d(ctx,
+            ggml_mul(ctx, res.weights,
+                ggml_reshape_3d(ctx, identity_mask, 1, n_expert_used, n_tokens)),
+            n_expert_used, n_tokens));
+
+    res.weights_real = ggml_mul(ctx, res.weights,
+        ggml_reshape_3d(ctx, real_mask, 1, n_expert_used, n_tokens));
+
+    res.selected_real = ggml_cast(ctx,
+        ggml_mul(ctx, selected_experts_f, real_mask), GGML_TYPE_I32);
+
+    return res;
+}
+
 void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
     // LONGCAT_NGRAM_POSITION_AWARE_HISTORY
     if (!ubatch->token) {
@@ -1212,6 +1257,9 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
         auto & hist = (*token_history)[seq_id];
         while (!hist.empty() && hist.back().first >= pos_first) {
             hist.pop_back();
+        }
+        while ((int32_t) hist.size() > n - 1) {
+            hist.pop_front();
         }
     }
 
@@ -1312,9 +1360,11 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
         }
     }
 
-    // Tentatively record this decode by absolute position. Accepted drafts
-    // remain valid. Rejected drafts are removed automatically when the next
-    // decode rewinds to their position.
+    std::map<llama_seq_id, int32_t> appended;
+
+    // Tentatively record this decode by absolute position. Keep the committed
+    // lookback plus the current ubatch rows so a later rollback can remove
+    // rejected rows without losing the tokens immediately before them.
     for (int64_t i = 0; i < n_tokens; ++i) {
         for (int32_t s = 0; s < ubatch->n_seq_id[i]; ++s) {
             const llama_seq_id seq_id = ubatch->seq_id[i][s];
@@ -1325,9 +1375,15 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
                 hist.pop_back();
             }
             hist.emplace_back(pos, ubatch->token[i]);
-            while ((int32_t) hist.size() > n - 1) {
-                hist.pop_front();
-            }
+            appended[seq_id]++;
+        }
+    }
+
+    for (const auto & [seq_id, n_appended] : appended) {
+        auto & hist = (*token_history)[seq_id];
+        const int32_t max_history = n - 1 + n_appended;
+        while ((int32_t) hist.size() > max_history) {
+            hist.pop_front();
         }
     }
 }

@@ -660,6 +660,27 @@ public:
 // LONGCAT_NGRAM_POSITION_AWARE_HISTORY
 using llm_ngram_token_history = std::map<llama_seq_id, std::deque<std::pair<llama_pos, llama_token>>>;
 
+
+struct llm_graph_longcat_moe_route {
+    ggml_tensor * probs = nullptr;
+    ggml_tensor * selection_probs = nullptr;
+    ggml_tensor * selected_experts = nullptr;
+    ggml_tensor * selected_real = nullptr;
+    ggml_tensor * weights = nullptr;
+    ggml_tensor * weights_real = nullptr;
+    ggml_tensor * identity_weight_sum = nullptr;
+};
+
+llm_graph_longcat_moe_route llm_graph_build_longcat_moe_route(
+        ggml_context * ctx,
+        ggml_tensor * logits,
+        ggml_tensor * correction_bias,
+        int64_t n_tokens,
+        int32_t n_expert_real,
+        int32_t n_expert_total,
+        int32_t n_expert_used,
+        float expert_weights_scale);
+
 // N-gram hash embedding input for LongCat-Flash-Ngram
 // Computes polynomial rolling hash IDs from token history and current batch,
 // then provides them as I32 input tensors for embedding table lookups.

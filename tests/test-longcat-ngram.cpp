@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,17 @@ public:
         return read_row(0);
     }
 
+    std::array<int32_t, 3> append_many(
+            const std::vector<int32_t> & tokens,
+            const std::vector<int32_t> & positions,
+            int row,
+            int32_t seq_id = 0) {
+        const std::vector<int32_t> seq_ids(tokens.size(), seq_id);
+        const auto ubatch = make_ubatch(tokens, positions, seq_ids);
+        input->set_input(&ubatch);
+        return read_row(row);
+    }
+
     std::array<int32_t, 3> run_prefill(const std::vector<int32_t> & tokens, int pos, int32_t seq_id = 0) {
         std::vector<int32_t> positions(tokens.size());
         std::vector<int32_t> seq_ids(tokens.size(), seq_id);
@@ -100,6 +112,34 @@ public:
         const auto ubatch = make_ubatch(tokens, positions, seq_ids);
         input->set_input(&ubatch);
         return read_row(pos);
+    }
+
+    void seed_history(int32_t seq_id, const std::vector<std::pair<llama_pos, llama_token>> & entries) {
+        auto & hist = history[seq_id];
+        hist.clear();
+        for (const auto & entry : entries) {
+            hist.push_back(entry);
+        }
+    }
+
+    std::string history_trace(int32_t seq_id = 0) const {
+        const auto it = history.find(seq_id);
+        if (it == history.end()) {
+            return "[]";
+        }
+
+        std::ostringstream out;
+        out << "[";
+        bool first = true;
+        for (const auto & entry : it->second) {
+            if (!first) {
+                out << ",";
+            }
+            out << entry.first << ":" << entry.second;
+            first = false;
+        }
+        out << "]";
+        return out.str();
     }
 
     size_t history_size(int32_t seq_id = 0) const {
@@ -143,7 +183,7 @@ static void test_production_ngram(testing & t) {
         t.assert_equal(tc.name + " ng2", tc.ng2, ids[0]);
         t.assert_equal(tc.name + " ng3", tc.ng3, ids[1]);
         t.assert_equal(tc.name + " ng4", tc.ng4, ids[2]);
-        t.assert_true(tc.name + " bounded history", runner.history_size() <= (size_t) (LONGCAT_NEIGHBOR - 1));
+        t.assert_true(tc.name + " bounded history", runner.history_size() <= (size_t) (LONGCAT_NEIGHBOR - 1 + tc.tokens.size()));
     }
 
     production_ngram_runner runner;
@@ -154,7 +194,19 @@ static void test_production_ngram(testing & t) {
     t.assert_equal("rollback replacement ng2", 1441891, replacement[0]);
     t.assert_equal("rollback replacement ng3", 2339231, replacement[1]);
     t.assert_equal("rollback replacement ng4", 2204799, replacement[2]);
-    t.assert_true("rollback replacement bounded history", runner.history_size() <= (size_t) (LONGCAT_NEIGHBOR - 1));
+    t.assert_true("rollback replacement bounded history", runner.history_size() <= (size_t) LONGCAT_NEIGHBOR);
+
+    production_ngram_runner speculative;
+    speculative.seed_history(0, { { 97, 97 }, { 98, 98 }, { 99, 99 } });
+    t.assert_equal("speculative before first call", std::string("[97:97,98:98,99:99]"), speculative.history_trace());
+    speculative.append_many({ 100, 888 }, { 100, 101 }, 1);
+    t.assert_equal("speculative after draft ubatch", std::string("[97:97,98:98,99:99,100:100,101:888]"), speculative.history_trace());
+    const auto repl = speculative.append_one(101, 101);
+    t.assert_equal("speculative after rollback replacement", std::string("[98:98,99:99,100:100,101:101]"), speculative.history_trace());
+    t.assert_equal("replacement uses p for ng2", 2883684, repl[0]);
+    t.assert_equal("replacement uses p and p-1 for ng3", 7677892, repl[1]);
+    t.assert_equal("replacement uses p p-1 p-2 for ng4", 4140793, repl[2]);
+    t.assert_true("speculative lifecycle bounded history", speculative.history_size() <= (size_t) (2 * LONGCAT_NEIGHBOR));
 
     production_ngram_runner multi;
     multi.append_one(10, 0, 0);
