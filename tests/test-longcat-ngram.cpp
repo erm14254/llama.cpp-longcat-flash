@@ -30,7 +30,7 @@ struct ngram_expect {
 static llama_ubatch make_ubatch(
         const std::vector<int32_t> & tokens,
         const std::vector<int32_t> & positions,
-        const std::vector<int32_t> & seq_ids) {
+        const std::vector<std::vector<int32_t>> & seq_ids) {
     llama_ubatch ubatch = {};
     ubatch.data = std::make_shared<llama_ubatch::data_t>();
     auto & data = *ubatch.data;
@@ -38,11 +38,17 @@ static llama_ubatch make_ubatch(
     const uint32_t n_tokens = (uint32_t) tokens.size();
     data.token.assign(tokens.begin(), tokens.end());
     data.pos.assign(positions.begin(), positions.end());
-    data.n_seq_id.assign(n_tokens, 1);
-    data.seq_id_data.assign(seq_ids.begin(), seq_ids.end());
+    data.n_seq_id.resize(n_tokens);
     data.seq_id.resize(n_tokens);
+    size_t n_seq_ids = 0;
     for (uint32_t i = 0; i < n_tokens; ++i) {
-        data.seq_id[i] = &data.seq_id_data[i];
+        n_seq_ids += seq_ids[i].size();
+    }
+    data.seq_id_data.reserve(n_seq_ids);
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        data.n_seq_id[i] = (int32_t) seq_ids[i].size();
+        data.seq_id[i] = data.seq_id_data.data() + data.seq_id_data.size();
+        data.seq_id_data.insert(data.seq_id_data.end(), seq_ids[i].begin(), seq_ids[i].end());
     }
 
     ubatch.n_tokens = n_tokens;
@@ -55,6 +61,17 @@ static llama_ubatch make_ubatch(
     ubatch.n_seq_id = data.n_seq_id.data();
     ubatch.seq_id = data.seq_id.data();
     return ubatch;
+}
+
+static llama_ubatch make_ubatch(
+        const std::vector<int32_t> & tokens,
+        const std::vector<int32_t> & positions,
+        const std::vector<int32_t> & seq_ids) {
+    std::vector<std::vector<int32_t>> seq_ids_multi(tokens.size());
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        seq_ids_multi[i] = { seq_ids[i] };
+    }
+    return make_ubatch(tokens, positions, seq_ids_multi);
 }
 
 class production_ngram_runner {
@@ -87,7 +104,7 @@ public:
     }
 
     std::array<int32_t, 3> append_one(int32_t token, int32_t pos, int32_t seq_id = 0) {
-        const auto ubatch = make_ubatch({ token }, { pos }, { seq_id });
+        const auto ubatch = make_ubatch(std::vector<int32_t>{ token }, std::vector<int32_t>{ pos }, std::vector<int32_t>{ seq_id });
         input->set_input(&ubatch);
         return read_row(0);
     }
@@ -101,6 +118,15 @@ public:
         const auto ubatch = make_ubatch(tokens, positions, seq_ids);
         input->set_input(&ubatch);
         return read_row(row);
+    }
+
+    std::array<int32_t, 3> append_shared(
+            int32_t token,
+            int32_t pos,
+            const std::vector<int32_t> & seq_ids) {
+        const auto ubatch = make_ubatch(std::vector<int32_t>{ token }, std::vector<int32_t>{ pos }, std::vector<std::vector<int32_t>>{ seq_ids });
+        input->set_input(&ubatch);
+        return read_row(0);
     }
 
     std::array<int32_t, 3> run_prefill(const std::vector<int32_t> & tokens, int pos, int32_t seq_id = 0) {
@@ -215,6 +241,20 @@ static void test_production_ngram(testing & t) {
     const auto seq_b = multi.append_one(32, 2, 1);
     t.assert_equal("independent sequence a ng2", 20, seq_a[0]);
     t.assert_equal("independent sequence b ng2", 32, seq_b[0]);
+
+    production_ngram_runner shared;
+    shared.append_one(10, 0, 0);
+    shared.append_one(11, 1, 0);
+    shared.append_one(12, 2, 0);
+    shared.append_one(10, 0, 1);
+    shared.append_one(11, 1, 1);
+    shared.append_one(12, 2, 1);
+    const auto shared_ids = shared.append_shared(13, 3, { 0, 1 });
+    t.assert_equal("shared sequence identical history ng2", 1572877, shared_ids[0]);
+    t.assert_equal("shared sequence identical history ng3", 6649401, shared_ids[1]);
+    t.assert_equal("shared sequence identical history ng4", 5024532, shared_ids[2]);
+    t.assert_equal("shared sequence history updated a", std::string("[0:10,1:11,2:12,3:13]"), shared.history_trace(0));
+    t.assert_equal("shared sequence history updated b", std::string("[0:10,1:11,2:12,3:13]"), shared.history_trace(1));
 }
 
 int main() {

@@ -1,10 +1,8 @@
 #include "llama-graph.h"
 #include "testing.h"
 
-#include "ggml-backend.h"
-#include "ggml-cpu.h"
-
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -16,6 +14,14 @@ struct route_result {
     std::vector<double> weights;
     double real = 0.0;
     double identity = 0.0;
+};
+
+struct route_token_result {
+    std::array<int32_t, 2> selected;
+    std::array<int32_t, 2> selected_real;
+    std::array<float, 2> weights;
+    std::array<float, 2> weights_real;
+    float identity_sum;
 };
 
 static std::vector<double> softmax(const std::vector<double> & logits) {
@@ -106,9 +112,10 @@ static void test_router(testing & t) {
     t.assert_true("multiple token batch identity contribution", identity > 7.0);
 }
 
-static route_result run_production_route(
+static std::vector<route_token_result> run_production_route(
         const std::vector<float> & logits_data,
-        const std::vector<float> & bias_data) {
+        const std::vector<float> & bias_data,
+        int n_tokens) {
     struct ggml_init_params params = {
         /* .mem_size   = */ 1024 * 1024,
         /* .mem_buffer = */ nullptr,
@@ -117,35 +124,47 @@ static route_result run_production_route(
     ggml_context * ctx = ggml_init(params);
     GGML_ASSERT(ctx != nullptr);
 
-    ggml_tensor * logits = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 5, 1);
+    ggml_tensor * logits = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 5, n_tokens);
     ggml_tensor * bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 5);
-    auto route = llm_graph_build_longcat_moe_route(ctx, logits, bias, 1, 3, 5, 2, 6.0f);
+    auto route = llm_graph_build_longcat_moe_route(ctx, logits, bias, n_tokens, 3, 5, 2, 6.0f);
 
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 32, false);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 128, false);
     ggml_build_forward_expand(gf, route.selected_experts);
     ggml_build_forward_expand(gf, route.selected_real);
+    ggml_build_forward_expand(gf, route.weights);
     ggml_build_forward_expand(gf, route.weights_real);
     ggml_build_forward_expand(gf, route.identity_weight_sum);
 
-    memcpy(logits->data, logits_data.data(), logits_data.size() * sizeof(float));
-    memcpy(bias->data, bias_data.data(), bias_data.size() * sizeof(float));
-    ggml_graph_compute_with_ctx(ctx, gf, 1);
-
-    const int32_t * selected = (const int32_t *) route.selected_experts->data;
-    const int32_t * selected_real = (const int32_t *) route.selected_real->data;
-    const float * weights_real = (const float *) route.weights_real->data;
-    const float * identity_sum = (const float *) route.identity_weight_sum->data;
-
-    route_result res;
-    for (int i = 0; i < 2; ++i) {
-        res.ids.push_back(selected[i]);
-        if (selected[i] < 3) {
-            res.real += weights_real[i];
+    for (int token = 0; token < n_tokens; ++token) {
+        for (int expert = 0; expert < 5; ++expert) {
+            char * data = (char *) logits->data + expert * logits->nb[0] + token * logits->nb[1];
+            *(float *) data = logits_data[token * 5 + expert];
         }
-        GGML_ASSERT(selected[i] < 3 || selected_real[i] == 0);
-        GGML_ASSERT(selected[i] < 3 || weights_real[i] == 0.0f);
     }
-    res.identity = identity_sum[0];
+    for (int expert = 0; expert < 5; ++expert) {
+        char * data = (char *) bias->data + expert * bias->nb[0];
+        *(float *) data = bias_data[expert];
+    }
+    ggml_graph_compute_with_ctx(ctx, gf, 1);
+    auto get_i32 = [](const ggml_tensor * tensor, int64_t i0, int64_t i1) {
+        const char * data = (const char *) tensor->data + i0 * tensor->nb[0] + i1 * tensor->nb[1];
+        return *(const int32_t *) data;
+    };
+    auto get_f32 = [](const ggml_tensor * tensor, int64_t i0, int64_t i1, int64_t i2 = 0) {
+        const char * data = (const char *) tensor->data + i0 * tensor->nb[0] + i1 * tensor->nb[1] + i2 * tensor->nb[2];
+        return *(const float *) data;
+    };
+
+    std::vector<route_token_result> res(n_tokens);
+    for (int token = 0; token < n_tokens; ++token) {
+        for (int k = 0; k < 2; ++k) {
+            res[token].selected[k] = get_i32(route.selected_experts, k, token);
+            res[token].selected_real[k] = get_i32(route.selected_real, k, token);
+            res[token].weights[k] = get_f32(route.weights, 0, k, token);
+            res[token].weights_real[k] = get_f32(route.weights_real, 0, k, token);
+        }
+        res[token].identity_sum = get_f32(route.identity_weight_sum, 0, token);
+    }
 
     ggml_free(ctx);
     return res;
@@ -154,21 +173,59 @@ static route_result run_production_route(
 static void test_production_route_helper(testing & t) {
     const std::vector<float> no_bias = { 0, 0, 0, 0, 0 };
 
-    const auto identity = run_production_route({ 0, 0, 0, 5, 4 }, no_bias);
-    t.assert_true("production route selects identity first", identity.ids[0] >= 3);
-    t.assert_true("production route selects identity second", identity.ids[1] >= 3);
-    t.assert_true("identity selections have zero real contribution", near(0.0, identity.real));
-    t.assert_true("identity selected mass scaled once", near(5.912626155935248, identity.identity));
+    const auto identity = run_production_route({ 0, 0, 0, 5, 4 }, no_bias, 1)[0];
+    t.assert_true("production route selects identity first", identity.selected[0] >= 3);
+    t.assert_true("production route selects identity second", identity.selected[1] >= 3);
+    t.assert_true("identity selected mass scaled once", near(5.912626155935248, identity.identity_sum));
+    t.assert_true("identity selections have zero real weight 0", near(0.0, identity.weights_real[0]));
+    t.assert_true("identity selections have zero real weight 1", near(0.0, identity.weights_real[1]));
 
-    const auto mixed = run_production_route({ 5, 0, 0, 4, 0 }, no_bias);
-    t.assert_true("production route mixed real", mixed.ids[0] < 3 || mixed.ids[1] < 3);
-    t.assert_true("production route mixed identity", mixed.ids[0] >= 3 || mixed.ids[1] >= 3);
-    t.assert_true("mixed real contribution", near(4.3224760735286125, mixed.real));
-    t.assert_true("mixed identity contribution excludes unselected", near(1.590150082406636, mixed.identity));
+    const auto mixed = run_production_route({ 5, 0, 0, 4, 0 }, no_bias, 1)[0];
+    t.assert_true("production route mixed real", mixed.selected[0] < 3 || mixed.selected[1] < 3);
+    t.assert_true("production route mixed identity", mixed.selected[0] >= 3 || mixed.selected[1] >= 3);
+    t.assert_true("mixed real contribution", near(4.3224760735286125, mixed.weights_real[0] + mixed.weights_real[1]));
+    t.assert_true("mixed identity contribution excludes unselected", near(1.590150082406636, mixed.identity_sum));
 
-    const auto biased = run_production_route({ 0, 4, 3, 0, 0 }, { 0, 0, 0, 10, 0 });
-    t.assert_true("production route bias selects identity", biased.ids[0] >= 3 || biased.ids[1] >= 3);
-    t.assert_true("bias does not alter selected weights", near(0.07723629290886723, biased.identity));
+    const auto biased = run_production_route({ 0, 4, 3, 0, 0 }, { 0, 0, 0, 10, 0 }, 1)[0];
+    t.assert_true("production route bias selects identity", biased.selected[0] >= 3 || biased.selected[1] >= 3);
+    t.assert_true("bias does not alter selected weights", near(0.07723629290886723, biased.identity_sum));
+
+    const std::vector<float> logits = {
+        0, 0, 0, 5, 4,
+        5, 0, 0, 4, 0,
+        5, 4, 3, 0, 0,
+    };
+    const auto batch = run_production_route(logits, no_bias, 3);
+
+    t.assert_equal("token 0 selected 0", 3, batch[0].selected[0]);
+    t.assert_equal("token 0 selected 1", 4, batch[0].selected[1]);
+    t.assert_equal("token 0 remap 0", 0, batch[0].selected_real[0]);
+    t.assert_equal("token 0 remap 1", 0, batch[0].selected_real[1]);
+    t.assert_true("token 0 scaled selected weight 0", near(4.322475910186768, batch[0].weights[0]));
+    t.assert_true("token 0 scaled selected weight 1", near(1.5901501178741455, batch[0].weights[1]));
+    t.assert_true("token 0 real weight 0", near(0.0, batch[0].weights_real[0]));
+    t.assert_true("token 0 real weight 1", near(0.0, batch[0].weights_real[1]));
+    t.assert_true("token 0 identity sum", near(5.912626266479492, batch[0].identity_sum));
+
+    t.assert_equal("token 1 selected 0", 0, batch[1].selected[0]);
+    t.assert_equal("token 1 selected 1", 3, batch[1].selected[1]);
+    t.assert_equal("token 1 remap 0", 0, batch[1].selected_real[0]);
+    t.assert_equal("token 1 remap 1", 0, batch[1].selected_real[1]);
+    t.assert_true("token 1 scaled selected weight 0", near(4.322475910186768, batch[1].weights[0]));
+    t.assert_true("token 1 scaled selected weight 1", near(1.5901501178741455, batch[1].weights[1]));
+    t.assert_true("token 1 real weight 0", near(4.322475910186768, batch[1].weights_real[0]));
+    t.assert_true("token 1 real weight 1", near(0.0, batch[1].weights_real[1]));
+    t.assert_true("token 1 identity sum", near(1.5901501178741455, batch[1].identity_sum));
+
+    t.assert_equal("token 2 selected 0", 0, batch[2].selected[0]);
+    t.assert_equal("token 2 selected 1", 1, batch[2].selected[1]);
+    t.assert_equal("token 2 remap 0", 0, batch[2].selected_real[0]);
+    t.assert_equal("token 2 remap 1", 1, batch[2].selected_real[1]);
+    t.assert_true("token 2 scaled selected weight 0", near(3.9559807777404785, batch[2].weights[0]));
+    t.assert_true("token 2 scaled selected weight 1", near(1.4553236961364746, batch[2].weights[1]));
+    t.assert_true("token 2 real weight 0", near(3.9559807777404785, batch[2].weights_real[0]));
+    t.assert_true("token 2 real weight 1", near(1.4553236961364746, batch[2].weights_real[1]));
+    t.assert_true("token 2 identity sum", near(0.0, batch[2].identity_sum));
 }
 
 int main() {

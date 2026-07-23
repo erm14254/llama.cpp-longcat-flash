@@ -1317,6 +1317,18 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
         return token_at(row, seq_id, prev_pos);
     };
 
+    for (int64_t i = 0; i < n_tokens; ++i) {
+        const llama_seq_id seq_id0 = ubatch->seq_id[i][0];
+        const llama_pos pos = ubatch->pos[i];
+        for (int32_t s = 1; s < ubatch->n_seq_id[i]; ++s) {
+            const llama_seq_id seq_id = ubatch->seq_id[i][s];
+            for (int32_t shift = 1; shift < n; ++shift) {
+                GGML_ASSERT(shifted_token_at(i, seq_id, pos, shift) ==
+                    shifted_token_at(i, seq_id0, pos, shift));
+            }
+        }
+    }
+
     for (int32_t ng = 2; ng <= n; ++ng) {
         for (int32_t j = 0; j < k; ++j) {
             const int32_t index = (ng - 2) * k + j;
@@ -1337,9 +1349,8 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
             for (int64_t i = 0; i < n_tokens; ++i) {
                 GGML_ASSERT(ubatch->n_seq_id[i] > 0);
 
-                // A graph row has one set of n-gram IDs. Shared-sequence rows
-                // are expected to have identical token histories; use the
-                // first sequence as the canonical history for that row.
+                // A graph row has one set of n-gram IDs. Coupled sequence rows
+                // must have identical visible history, verified above.
                 const llama_seq_id seq_id = ubatch->seq_id[i][0];
                 const llama_pos pos = ubatch->pos[i];
 

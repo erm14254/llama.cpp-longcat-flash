@@ -641,7 +641,6 @@ llama_model_longcat_flash_ngram::graph_mtp::graph_mtp(
     GGML_ASSERT(layer.nextn.hnorm && "LongCat MTP block missing nextn.hnorm");
 
     const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
-    const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla();
     const int64_t n_embd_head_qk_rope = hparams.n_rot();
     const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
     const uint32_t kv_lora_rank = hparams.n_lora_kv;
