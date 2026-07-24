@@ -25,6 +25,12 @@ static __global__ void mm_ids_helper(
             for (int iex = 0; iex < n_expert_used; ++iex) {
                 const int expert_used = ids[it*si1 + iex];
                 nex_prev += expert_used < expert;
+            }
+        }
+
+        for (int it = 0; it < n_tokens; ++it) {
+            for (int iex = 0; iex < n_expert_used; ++iex) {
+                const int expert_used = ids[it*si1 + iex];
                 if (expert_used == expert) {
                     const int compact = nex_prev + it_compact;
                     ids_dst[compact] = it*n_expert_used + iex;
