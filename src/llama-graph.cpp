@@ -1198,9 +1198,8 @@ llm_graph_longcat_moe_route llm_graph_build_longcat_moe_route(
 
     ggml_tensor * selected_experts_f = ggml_cast(ctx, res.selected_experts, GGML_TYPE_F32);
     ggml_tensor * identity_mask = ggml_step(ctx,
-        ggml_add(ctx, selected_experts_f, ggml_new_f32(ctx, 0.5f - (float) n_expert_real)));
-    ggml_tensor * real_mask = ggml_add(ctx,
-        ggml_scale(ctx, identity_mask, -1.0f), ggml_new_f32(ctx, 1.0f));
+        ggml_scale_bias(ctx, selected_experts_f, 1.0f, 0.5f - (float) n_expert_real));
+    ggml_tensor * real_mask = ggml_scale_bias(ctx, identity_mask, -1.0f, 1.0f);
 
     res.identity_weight_sum = ggml_sum_rows(ctx,
         ggml_reshape_2d(ctx,

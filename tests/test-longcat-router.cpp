@@ -1,6 +1,9 @@
 #include "llama-graph.h"
 #include "testing.h"
 
+#include "ggml-backend.h"
+#include "ggml-cpu.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -119,7 +122,7 @@ static std::vector<route_token_result> run_production_route(
     struct ggml_init_params params = {
         /* .mem_size   = */ 1024 * 1024,
         /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ false,
+        /* .no_alloc   = */ true,
     };
     ggml_context * ctx = ggml_init(params);
     GGML_ASSERT(ctx != nullptr);
@@ -135,37 +138,41 @@ static std::vector<route_token_result> run_production_route(
     ggml_build_forward_expand(gf, route.weights_real);
     ggml_build_forward_expand(gf, route.identity_weight_sum);
 
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    GGML_ASSERT(backend != nullptr);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    GGML_ASSERT(buffer != nullptr);
+
+    std::vector<float> logits_storage(5 * n_tokens);
     for (int token = 0; token < n_tokens; ++token) {
         for (int expert = 0; expert < 5; ++expert) {
-            char * data = (char *) logits->data + expert * logits->nb[0] + token * logits->nb[1];
-            *(float *) data = logits_data[token * 5 + expert];
+            logits_storage[expert + token * 5] = logits_data[token * 5 + expert];
         }
     }
-    for (int expert = 0; expert < 5; ++expert) {
-        char * data = (char *) bias->data + expert * bias->nb[0];
-        *(float *) data = bias_data[expert];
-    }
-    ggml_graph_compute_with_ctx(ctx, gf, 1);
-    auto get_i32 = [](const ggml_tensor * tensor, int64_t i0, int64_t i1) {
-        const char * data = (const char *) tensor->data + i0 * tensor->nb[0] + i1 * tensor->nb[1];
-        return *(const int32_t *) data;
-    };
-    auto get_f32 = [](const ggml_tensor * tensor, int64_t i0, int64_t i1, int64_t i2 = 0) {
-        const char * data = (const char *) tensor->data + i0 * tensor->nb[0] + i1 * tensor->nb[1] + i2 * tensor->nb[2];
-        return *(const float *) data;
-    };
+    ggml_backend_tensor_set(logits, logits_storage.data(), 0, ggml_nbytes(logits));
+    ggml_backend_tensor_set(bias, bias_data.data(), 0, ggml_nbytes(bias));
+
+    const ggml_status status = ggml_backend_graph_compute(backend, gf);
+    GGML_ASSERT(status == GGML_STATUS_SUCCESS);
 
     std::vector<route_token_result> res(n_tokens);
     for (int token = 0; token < n_tokens; ++token) {
         for (int k = 0; k < 2; ++k) {
-            res[token].selected[k] = get_i32(route.selected_experts, k, token);
-            res[token].selected_real[k] = get_i32(route.selected_real, k, token);
-            res[token].weights[k] = get_f32(route.weights, 0, k, token);
-            res[token].weights_real[k] = get_f32(route.weights_real, 0, k, token);
+            ggml_backend_tensor_get(route.selected_experts, &res[token].selected[k],
+                k * route.selected_experts->nb[0] + token * route.selected_experts->nb[1], sizeof(int32_t));
+            ggml_backend_tensor_get(route.selected_real, &res[token].selected_real[k],
+                k * route.selected_real->nb[0] + token * route.selected_real->nb[1], sizeof(int32_t));
+            ggml_backend_tensor_get(route.weights, &res[token].weights[k],
+                k * route.weights->nb[1] + token * route.weights->nb[2], sizeof(float));
+            ggml_backend_tensor_get(route.weights_real, &res[token].weights_real[k],
+                k * route.weights_real->nb[1] + token * route.weights_real->nb[2], sizeof(float));
         }
-        res[token].identity_sum = get_f32(route.identity_weight_sum, 0, token);
+        ggml_backend_tensor_get(route.identity_weight_sum, &res[token].identity_sum,
+            token * route.identity_weight_sum->nb[1], sizeof(float));
     }
 
+    ggml_backend_buffer_free(buffer);
+    ggml_backend_free(backend);
     ggml_free(ctx);
     return res;
 }
