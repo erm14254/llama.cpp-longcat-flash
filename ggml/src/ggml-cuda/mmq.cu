@@ -199,40 +199,6 @@ void ggml_cuda_mul_mat_q(
         CUDA_CHECK(cudaGetLastError());
     }
 
-#define GGML_CUDA_PROFILE_MMQ_TYPE(type_name) \
-    do { \
-        const size_t smpbo = ggml_cuda_info().devices[ggml_cuda_get_device()].smpbo; \
-        const int tile_width = fallback ? ggml_cuda_mmq_get_J_best<type_name, true>(cc, smpbo, ne_get_rows) : \
-                                          ggml_cuda_mmq_get_J_best<type_name, false>(cc, smpbo, ne_get_rows); \
-        ggml_cuda_profile_mul_mat_id_tiles("MMQ", expert_bounds.get(), ne02, ne12, n_expert_used, tile_width, stream); \
-    } while (0)
-
-    switch (src0->type) {
-        case GGML_TYPE_Q1_0:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q1_0);    break;
-        case GGML_TYPE_Q4_0:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q4_0);    break;
-        case GGML_TYPE_Q4_1:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q4_1);    break;
-        case GGML_TYPE_Q5_0:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q5_0);    break;
-        case GGML_TYPE_Q5_1:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q5_1);    break;
-        case GGML_TYPE_Q8_0:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q8_0);    break;
-        case GGML_TYPE_Q2_K:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q2_K);    break;
-        case GGML_TYPE_Q3_K:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q3_K);    break;
-        case GGML_TYPE_Q4_K:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q4_K);    break;
-        case GGML_TYPE_Q5_K:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q5_K);    break;
-        case GGML_TYPE_Q6_K:    GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_Q6_K);    break;
-        case GGML_TYPE_MXFP4:   GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_MXFP4);   break;
-        case GGML_TYPE_NVFP4:   GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_NVFP4);   break;
-        case GGML_TYPE_IQ1_S:   GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ1_S);   break;
-        case GGML_TYPE_IQ2_XXS: GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ2_XXS); break;
-        case GGML_TYPE_IQ2_XS:  GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ2_XS);  break;
-        case GGML_TYPE_IQ2_S:   GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ2_S);   break;
-        case GGML_TYPE_IQ3_XXS: GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ3_XXS); break;
-        case GGML_TYPE_IQ3_S:   GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ3_S);   break;
-        case GGML_TYPE_IQ4_XS:  GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ4_XS);  break;
-        case GGML_TYPE_IQ4_NL:  GGML_CUDA_PROFILE_MMQ_TYPE(GGML_TYPE_IQ4_NL);  break;
-        default: break;
-    }
-
-#undef GGML_CUDA_PROFILE_MMQ_TYPE
 
     const size_t nbytes_src1_q8_1 = ne12*n_expert_used*ne10_padded * y_block_size/y_values_per_block +
         ggml_cuda_mmq_get_J_max(src0->type, fallback, cc, ne11) * sizeof(block_q8_1_mmq);

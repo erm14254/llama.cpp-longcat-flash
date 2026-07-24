@@ -1,9 +1,7 @@
 #include "common.cuh"
 #include "mmid.cuh"
 
-#include <algorithm>
 #include <cstdlib>
-#include <cstdio>
 #include <vector>
 
 // Helper function for mul_mat_id, converts ids to a more convenient format.
@@ -251,45 +249,6 @@ static void launch_mm_ids_helper(
     for (int count : seen) {
         GGML_ASSERT(count == 1);
     }
-}
-
-
-void ggml_cuda_profile_mul_mat_id_tiles(
-        const char * path, const int32_t * expert_bounds, const int n_experts, const int n_tokens, const int n_expert_used,
-        const int tile_width, cudaStream_t stream) {
-    if (getenv("GGML_CUDA_PROFILE_MUL_MAT_ID") == nullptr) {
-        return;
-    }
-
-    GGML_ASSERT(tile_width > 0);
-
-    std::vector<int32_t> expert_bounds_host(n_experts + 1);
-    CUDA_CHECK(cudaMemcpyAsync(expert_bounds_host.data(), expert_bounds, expert_bounds_host.size()*sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    int64_t total_compact_rows = 0;
-    int64_t max_occurrences    = 0;
-    int64_t ideal_tiles        = 0;
-
-    for (int expert = 0; expert < n_experts; ++expert) {
-        const int64_t occurrences = int64_t(expert_bounds_host[expert + 1]) - expert_bounds_host[expert];
-        GGML_ASSERT(occurrences >= 0);
-        total_compact_rows += occurrences;
-        max_occurrences = std::max(max_occurrences, occurrences);
-        ideal_tiles += (occurrences + tile_width - 1) / tile_width;
-    }
-
-    const int64_t conservative_tiles = int64_t(n_experts) * ((int64_t(n_tokens)*n_expert_used + tile_width - 1) / tile_width);
-    const int64_t excess_tiles       = conservative_tiles - ideal_tiles;
-    const double  excess_pct         = conservative_tiles > 0 ? 100.0*double(excess_tiles)/double(conservative_tiles) : 0.0;
-
-    fprintf(stderr,
-        "ggml_cuda_mul_mat_id_profile: path=%s n_tokens=%d n_expert_used=%d n_experts=%d "
-        "total_compact_rows=%lld max_occurrences_per_expert=%lld tile_width=%d "
-        "ideal_compact_tiles=%lld conservative_launched_tiles=%lld excess_tiles=%lld excess_pct=%.2f\n",
-        path, n_tokens, n_expert_used, n_experts,
-        (long long) total_compact_rows, (long long) max_occurrences, tile_width,
-        (long long) ideal_tiles, (long long) conservative_tiles, (long long) excess_tiles, excess_pct);
 }
 
 void ggml_cuda_launch_mm_ids_helper(
