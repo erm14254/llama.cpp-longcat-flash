@@ -1,6 +1,12 @@
-# llama.cpp
+# llama.cpp — MiniMax-M3 Unified Support
 
-![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
+This standalone fork adds support for MiniMax-M3 GGUFs on llama.cpp including Sparse Attention and Vision.
+
+Standard upstream llama.cpp builds cannot currently load these GGUF files.
+
+Implementation branch: minimax-m3-unified-v2
+
+![llama](https://github.com/user-attachments/assets/9951b503-3e65-41d9-b81c-a51bcc16b62e)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
