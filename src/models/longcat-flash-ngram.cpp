@@ -312,6 +312,7 @@ llama_model_longcat_flash_ngram::graph::graph(
 
     const uint32_t n_expert_real = hparams.n_expert;
     const uint32_t n_expert_zero = hparams.n_expert_zero;
+    const uint32_t n_expert_total = n_expert_real + n_expert_zero;
 
     // YaRN mscale computation (same as DeepSeek2)
     GGML_ASSERT(ext_factor >= 0.0f);
@@ -335,13 +336,15 @@ llama_model_longcat_flash_ngram::graph::graph(
         const uint32_t n_neighbor = hparams.ngram_neighbor_num;    // 4
         const uint32_t n_split    = hparams.ngram_split_num;       // 4
         const uint32_t n_ngram    = (n_neighbor - 1) * n_split;    // 12
-        const int64_t  vocab_size = model.tok_embd->ne[1];
-        const int64_t  m          = (int64_t)hparams.ngram_vocab_size_ratio * vocab_size;
+        const int64_t  vocab_size   = model.tok_embd->ne[1];
+        const int64_t  m            = (int64_t)hparams.ngram_vocab_size_ratio * vocab_size;
+        const int32_t  eos_token_id = model.vocab.token_eos();
+        GGML_ASSERT(eos_token_id == 2);
 
         // Create n-gram input: 12 I32 tensors of hash IDs, computed on CPU in set_input()
         auto inp = std::make_unique<llm_graph_input_ngram>(
             (int32_t)n_ngram, (int32_t)n_neighbor, (int32_t)n_split,
-            (int32_t)vocab_size, m,
+            (int32_t)vocab_size, m, eos_token_id,
             &res->ngram_token_history);
 
         for (uint32_t j = 0; j < n_ngram; j++) {
@@ -507,62 +510,37 @@ llama_model_longcat_flash_ngram::graph::graph(
                 ggml_tensor * logits = ggml_mul_mat(ctx0, gate_inp, cur); // [n_expert_total, n_tokens]
                 cb(logits, "ffn_moe_logits", il);
 
-                ggml_tensor * probs = ggml_soft_max(ctx0, logits);
-                cb(probs, "ffn_moe_probs", il);
+                auto route = llm_graph_build_longcat_moe_route(
+                    ctx0, logits, model.layers[il].ffn_exp_probs_b,
+                    n_tokens, n_expert_real, n_expert_total, n_expert_used,
+                    hparams.expert_weights_scale);
 
-                // Split probs: real [0..256) and identity [256..384)
-                ggml_tensor * real_probs = ggml_cont(ctx0,
-                    ggml_view_2d(ctx0, probs, n_expert_real, n_tokens, probs->nb[1], 0));
-                cb(real_probs, "ffn_moe_real_probs", il);
+                cb(route.probs, "ffn_moe_probs", il);
+                cb(route.selection_probs, "ffn_moe_probs_biased", il);
+                cb(route.selected_experts, "ffn_moe_topk", il);
+                cb(route.weights, "ffn_moe_weights_scaled", il);
+                cb(route.identity_weight_sum, "identity_weight_sum", il);
+                cb(route.weights_real, "ffn_moe_weights_real", il);
+                cb(route.selected_real, "ffn_moe_topk_real", il);
 
-                ggml_tensor * id_probs = ggml_cont(ctx0,
-                    ggml_view_2d(ctx0, probs, n_expert_zero, n_tokens,
-                        probs->nb[1], n_expert_real * ggml_element_size(probs)));
-
-                // Sum all identity expert probs per token
-                ggml_tensor * identity_weight_sum = ggml_sum_rows(ctx0, id_probs);
-                identity_weight_sum = ggml_scale(ctx0, identity_weight_sum, hparams.expert_weights_scale);
-                cb(identity_weight_sum, "identity_weight_sum", il);
-
-                // Add bias for selection only
-                ggml_tensor * selection_probs = real_probs;
-                if (model.layers[il].ffn_exp_probs_b) {
-                    ggml_tensor * real_bias = ggml_view_1d(ctx0,
-                        model.layers[il].ffn_exp_probs_b, n_expert_real, 0);
-                    selection_probs = ggml_add(ctx0, real_probs, real_bias);
-                    cb(selection_probs, "ffn_moe_probs_biased", il);
-                }
-
-                ggml_tensor * selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used);
-                cb(selected_experts, "ffn_moe_topk", il);
-
-                // Gather weights from UNBIASED probs
-                ggml_tensor * real_probs_3d = ggml_reshape_3d(ctx0, real_probs,
-                    1, (int64_t) n_expert_real, n_tokens);
-                ggml_tensor * weights = ggml_get_rows(ctx0, real_probs_3d, selected_experts);
-                cb(weights, "ffn_moe_weights", il);
-
-                weights = ggml_scale(ctx0, weights, hparams.expert_weights_scale);
-                cb(weights, "ffn_moe_weights_scaled", il);
-
-                ggml_build_forward_expand(gf, weights);
+                ggml_build_forward_expand(gf, route.weights);
 
                 // Expert FFN dispatch
                 ggml_tensor * cur_moe = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
-                ggml_tensor * up = build_lora_mm_id(model.layers[il].ffn_up_exps, cur_moe, selected_experts);
+                ggml_tensor * up = build_lora_mm_id(model.layers[il].ffn_up_exps, cur_moe, route.selected_real);
                 cb(up, "ffn_moe_up", il);
 
-                ggml_tensor * gate_proj = build_lora_mm_id(model.layers[il].ffn_gate_exps, cur_moe, selected_experts);
+                ggml_tensor * gate_proj = build_lora_mm_id(model.layers[il].ffn_gate_exps, cur_moe, route.selected_real);
                 cb(gate_proj, "ffn_moe_gate", il);
 
                 ggml_tensor * experts_out = ggml_swiglu_split(ctx0, gate_proj, up);
                 cb(experts_out, "ffn_moe_swiglu", il);
 
-                experts_out = build_lora_mm_id(model.layers[il].ffn_down_exps, experts_out, selected_experts);
+                experts_out = build_lora_mm_id(model.layers[il].ffn_down_exps, experts_out, route.selected_real);
                 cb(experts_out, "ffn_moe_down", il);
 
-                experts_out = ggml_mul(ctx0, experts_out, weights);
+                experts_out = ggml_mul(ctx0, experts_out, route.weights_real);
                 cb(experts_out, "ffn_moe_weighted", il);
 
                 // Aggregate expert outputs
@@ -580,7 +558,7 @@ llama_model_longcat_flash_ngram::graph::graph(
                 cb(moe_out, "ffn_moe_out", il);
 
                 // Identity residual
-                ggml_tensor * identity_residual = ggml_mul(ctx0, cur, identity_weight_sum);
+                ggml_tensor * identity_residual = ggml_mul(ctx0, cur, route.identity_weight_sum);
                 cb(identity_residual, "identity_residual", il);
 
                 moe_shortcut = ggml_add(ctx0, moe_out, identity_residual);
@@ -663,7 +641,6 @@ llama_model_longcat_flash_ngram::graph_mtp::graph_mtp(
     GGML_ASSERT(layer.nextn.hnorm && "LongCat MTP block missing nextn.hnorm");
 
     const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla();
-    const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla();
     const int64_t n_embd_head_qk_rope = hparams.n_rot();
     const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
     const uint32_t kv_lora_rank = hparams.n_lora_kv;

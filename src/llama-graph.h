@@ -660,6 +660,27 @@ public:
 // LONGCAT_NGRAM_POSITION_AWARE_HISTORY
 using llm_ngram_token_history = std::map<llama_seq_id, std::deque<std::pair<llama_pos, llama_token>>>;
 
+
+struct llm_graph_longcat_moe_route {
+    ggml_tensor * probs = nullptr;
+    ggml_tensor * selection_probs = nullptr;
+    ggml_tensor * selected_experts = nullptr;
+    ggml_tensor * selected_real = nullptr;
+    ggml_tensor * weights = nullptr;
+    ggml_tensor * weights_real = nullptr;
+    ggml_tensor * identity_weight_sum = nullptr;
+};
+
+llm_graph_longcat_moe_route llm_graph_build_longcat_moe_route(
+        ggml_context * ctx,
+        ggml_tensor * logits,
+        ggml_tensor * correction_bias,
+        int64_t n_tokens,
+        int32_t n_expert_real,
+        int32_t n_expert_total,
+        int32_t n_expert_used,
+        float expert_weights_scale);
+
 // N-gram hash embedding input for LongCat-Flash-Ngram
 // Computes polynomial rolling hash IDs from token history and current batch,
 // then provides them as I32 input tensors for embedding table lookups.
@@ -671,12 +692,14 @@ public:
             int32_t n_split,        // emb_split_num (e.g. 4)
             int32_t vocab_size,     // model vocab size
             int64_t m,              // ngram_vocab_size_ratio * vocab_size
+            int32_t eos_token_id,   // EOS token that terminates n-gram history segments
             llm_ngram_token_history * token_history) // persistent history (owned by llm_graph_result)
         : n_embedders(n_embedders)
         , n_neighbor(n_neighbor)
         , n_split(n_split)
         , vocab_size(vocab_size)
         , m(m)
+        , eos_token_id(eos_token_id)
         , token_history(token_history) {}
     virtual ~llm_graph_input_ngram() = default;
 
@@ -691,6 +714,7 @@ public:
     const int32_t n_split;
     const int32_t vocab_size;
     const int64_t m;
+    const int32_t eos_token_id;
 
     llm_ngram_token_history * token_history;
 };
