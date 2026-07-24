@@ -9811,6 +9811,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_Q8_0, 16, n_tokens, test_mul_mat_id_duplicate_ids::pattern::no_duplicates, 16));
     }
 
+    // Expert-count sweep for conservative-launch overhead: useful compact work is unchanged because
+    // every token slot is assigned to expert 0, while n_mats controls inactive expert count.
+    for (int64_t n_tokens : {9, 64, 128, 374}) {
+        for (int n_mats : {1, 4, 16, 64, 256}) {
+            test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_Q8_0, 16, n_tokens,
+                test_mul_mat_id_duplicate_ids::pattern::all_slots_one_expert, n_mats));
+        }
+    }
+
     // Conv2d: K=CRS=NPQ=4096 matmul performance
     uint32_t                        iwh_idx  = 0;
     uint32_t                        kwh_idx  = 1;
