@@ -9105,6 +9105,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (ggml_type type_a : all_types) {
         test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 4, 2, false, 64, 16, 3*ggml_blck_size(type_a)));
     }
+    for (int64_t n_tokens : {1, 10, 11}) {
+        test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_Q8_0, 16, n_tokens, test_mul_mat_id_duplicate_ids::pattern::all_slots_one_expert));
+        test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_Q8_0, 16, n_tokens, test_mul_mat_id_duplicate_ids::pattern::no_duplicates));
+    }
+    test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_BF16, 32, 17, test_mul_mat_id_duplicate_ids::pattern::no_duplicates));
+    test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_BF16, 33, 17, test_mul_mat_id_duplicate_ids::pattern::all_slots_one_expert));
     test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_Q8_0, 16, 9, test_mul_mat_id_duplicate_ids::pattern::all_slots_one_expert));
     test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_BF16, 32, 17, test_mul_mat_id_duplicate_ids::pattern::all_slots_one_expert));
     test_cases.emplace_back(new test_mul_mat_id_duplicate_ids(GGML_TYPE_BF16, 33, 17));
