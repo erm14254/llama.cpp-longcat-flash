@@ -460,6 +460,9 @@ public:
 
     std::vector<ggml_tensor *> self_k_rot_lid;
 
+    // the indexer mask always selects the first indexer_init_tokens and the last indexer_local_tokens visible keys
+    bool forced_keys = false;
+
     const llama_hparams hparams;
     const llama_cparams cparams;
 
@@ -769,6 +772,35 @@ public:
     bool can_reuse(const llm_graph_params & params) override;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
+};
+
+// LongCat n-gram embedding input: rolling hashes of each token and the tokens before it, one I32 row-id tensor per table
+// the preceding tokens come from the KV cache cells, so they follow seq_rm/seq_cp/seq_add and state save/load
+class llm_graph_input_ngram : public llm_graph_input_i {
+public:
+    llm_graph_input_ngram(
+            int32_t n_neighbor, // tokens per n-gram, including the current one
+            int32_t n_split,    // tables per n-gram size
+            int32_t vocab_size,
+            int64_t m,          // ngram_vocab_size_ratio * vocab_size
+            llama_token eos,    // tokens after an EOS do not see the EOS or anything before it
+            bool dsa,           // the memory is a llama_kv_cache_dsa (LongCat-Flash-Sparse)
+            const llama_memory_context_i * mctx_cur);
+    virtual ~llm_graph_input_ngram() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+    bool can_reuse(const llm_graph_params & params) override;
+
+    std::vector<ggml_tensor *> ngram_ids; // I32 [n_tokens] per table
+
+    const int32_t     n_neighbor;
+    const int32_t     n_split;
+    const int32_t     vocab_size;
+    const int64_t     m;
+    const llama_token eos;
+    const bool        dsa;
+
+    const llama_kv_cache_context * mctx;
 };
 
 //

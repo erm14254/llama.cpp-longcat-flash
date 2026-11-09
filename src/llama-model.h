@@ -135,6 +135,7 @@ enum llm_type {
     LLM_TYPE_32B_A9B, // Granite4 Hybrid
     LLM_TYPE_35B_A3B, // Qwen3.5
     LLM_TYPE_48B_A3B, // Kimi Linear
+    LLM_TYPE_68B_A3B, // LongCat-Flash-Lite
     LLM_TYPE_75B_A9B, // Nemotron 3 Puzzle
     LLM_TYPE_80B_A3B, // Qwen3 Next
     LLM_TYPE_A3B,     // Qwen3.8 Flash Next
@@ -946,6 +947,10 @@ struct llama_model {
 
     std::vector<llama_layer> layers;
 
+    // n-gram embeddings (LongCat-Flash-Ngram)
+    std::vector<struct ggml_tensor *> ngram_embd;
+    std::vector<struct ggml_tensor *> ngram_proj;
+
     //Dense linear projections for SentenceTransformers models like embeddinggemma
     // For Sentence Transformers models structure see
     // https://sbert.net/docs/sentence_transformer/usage/custom_models.html#structure-of-sentence-transformer-models
@@ -1067,6 +1072,9 @@ struct llama_model_base : public llama_model {
 
     // convenience overload of create_tensor that doesn't require llama_model_loader
     ggml_tensor * create_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
+
+    // create_tensor for a numbered tensor that is not a model layer but belongs with the input (e.g. one of several token-indexed tables)
+    ggml_tensor * create_tensor_input(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags);
 
     // helper: try merged gate_up_exps first, fall back to separate gate and up
     void create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_,

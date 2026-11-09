@@ -94,6 +94,10 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_mellum(params);
         case LLM_ARCH_NANBEIGE:
             return new llama_model_nanbeige(params);
+        case LLM_ARCH_LONGCAT_FLASH_NGRAM:
+            return new llama_model_longcat_flash_ngram(params);
+        case LLM_ARCH_LONGCAT_FLASH_SPARSE:
+            return new llama_model_longcat_flash_sparse(params);
         case LLM_ARCH_QWEN:
             return new llama_model_qwen(params);
         case LLM_ARCH_QWEN2:
@@ -1133,6 +1137,7 @@ const char * llm_type_name(llm_type type) {
         case LLM_TYPE_32B_A9B:       return "32B.A9B";
         case LLM_TYPE_35B_A3B:       return "35B.A3B";
         case LLM_TYPE_48B_A3B:       return "48B.A3B";
+        case LLM_TYPE_68B_A3B:       return "68B.A3B";
         case LLM_TYPE_75B_A9B:       return "75B.A9B";
         case LLM_TYPE_80B_A3B:       return "80B.A3B";
         case LLM_TYPE_A3B:           return "A3B";
@@ -2996,7 +3001,24 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
             } break;
         case LLM_ARCH_GLM_DSA:
         case LLM_ARCH_DEEPSEEK32:
+        case LLM_ARCH_LONGCAT_FLASH_SPARSE:
             {
+                ggml_type type_k = params.type_k;
+                ggml_type type_v = params.type_v;
+
+                if (arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
+                    // the absorbed MLA query exceeds the F16 range, so the K cache (also used as V) must be BF16 or F32
+                    if (type_k == GGML_TYPE_F16) {
+                        LLAMA_LOG_WARN("%s: promoting the K/V cache from F16 to BF16\n", __func__);
+                        type_k = GGML_TYPE_BF16;
+                    }
+                    if (type_k != GGML_TYPE_BF16 && type_k != GGML_TYPE_F32) {
+                        throw std::runtime_error(std::string("unsupported K cache type ") + ggml_type_name(type_k) +
+                                ", this model supports F16 (promoted to BF16), BF16 and F32");
+                    }
+                    type_v = type_k;
+                }
+
                 if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && hparams.n_layer_nextn > 0) {
                     // The NextN/MTP draft head runs dense MLA (no DSA indexer), so the
                     // MTP context uses a plain attention KV cache holding only the
@@ -3008,8 +3030,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             *this,
                             params.no_alloc,
                             hparams,
-                            params.type_k,
-                            params.type_v,
+                            type_k,
+                            type_v,
                             !cparams.flash_attn,
                             cparams.offload_kqv,
                             cparams.kv_unified,
@@ -3028,13 +3050,17 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     if (hparams.n_layer_nextn > 0) {
                         filter_mla = [&](uint32_t il) { return il < hparams.n_layer(); };
                     }
-                    llama_kv_cache::layer_filter_cb filter_lid = [&](uint32_t il) { return il < hparams.n_layer() && (arch != LLM_ARCH_GLM_DSA || hparams.is_indexer_full(il)); };
+                    // only the layers that own an indexer need an indexer cache
+                    const bool lid_owner_only = arch == LLM_ARCH_GLM_DSA || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE;
+                    llama_kv_cache::layer_filter_cb filter_lid = [&](uint32_t il) {
+                        return il < hparams.n_layer() && (!lid_owner_only || hparams.is_indexer_full(il));
+                    };
 
                     res = new llama_kv_cache_dsa(
                             *this,
                             params.no_alloc,
-                            params.type_k,
-                            params.type_v,
+                            type_k,
+                            type_v,
                             !cparams.flash_attn,
                             cparams.offload_kqv,
                             cparams.kv_unified,
@@ -3726,6 +3752,8 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_MUSE_GLIMMER:
         case LLM_ARCH_XING4_0:
         case LLM_ARCH_MUSE_SPARK:
+        case LLM_ARCH_LONGCAT_FLASH_NGRAM:
+        case LLM_ARCH_LONGCAT_FLASH_SPARSE:
         case LLM_ARCH_PLM:
         case LLM_ARCH_CHATGLM:
         case LLM_ARCH_GRANITE:
@@ -4050,6 +4078,14 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
 ggml_tensor * llama_model_base::create_tensor(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
     GGML_ASSERT(ml != nullptr);
     return create_tensor(*ml, tn, ne, flags);
+}
+
+ggml_tensor * llama_model_base::create_tensor_input(const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
+    GGML_ASSERT(ml != nullptr);
+    GGML_ASSERT(tn.bid != -1);
+    return ml->create_tensor(
+        hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, pimpl->dev_input.buft_list,
+        tn, ne, flags);
 }
 
 void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {

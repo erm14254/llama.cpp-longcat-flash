@@ -248,6 +248,7 @@ public:
     void set_input_k_shift(ggml_tensor * dst) const;
 
     void set_input_attn_mask (const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_attn_mask_forced_keys(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
     void set_input_relative_pos(ggml_tensor * dst, const llama_ubatch * ubatch, uint32_t extent) const;
 
@@ -453,6 +454,7 @@ public:
 
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_attn_mask (const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_attn_mask_forced_keys(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
     void set_input_relative_pos(ggml_tensor * dst, const llama_ubatch * ubatch, uint32_t extent) const;
 

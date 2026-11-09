@@ -734,7 +734,15 @@ void llm_graph_input_attn_k_dsa::set_input(const llama_ubatch * ubatch) {
 
     mctx->get_lid()->set_input_k_idxs(self_k_idxs_lid, ubatch);
 
-    mctx->get_lid()->set_input_attn_mask(self_attn_mask_lid, ubatch, cparams.causal_attn);
+    if (forced_keys) {
+        // the mask has no buffer when the graph does not compute the indexer scores
+        if (self_attn_mask_lid.raw->buffer) {
+            mctx->get_lid()->set_input_attn_mask_forced_keys(self_attn_mask_lid.raw, ubatch, cparams.causal_attn,
+                    hparams.indexer_init_tokens, hparams.indexer_local_tokens);
+        }
+    } else {
+        mctx->get_lid()->set_input_attn_mask(self_attn_mask_lid, ubatch, cparams.causal_attn);
+    }
 }
 
 bool llm_graph_input_attn_k_dsa::can_reuse(const llm_graph_params & params) {
@@ -1396,6 +1404,76 @@ bool llm_graph_input_sampling::can_reuse(const llm_graph_params & params) {
     }
 
     return true;
+}
+
+llm_graph_input_ngram::llm_graph_input_ngram(
+        int32_t n_neighbor,
+        int32_t n_split,
+        int32_t vocab_size,
+        int64_t m,
+        llama_token eos,
+        bool dsa,
+        const llama_memory_context_i * mctx_cur) :
+    n_neighbor(n_neighbor), n_split(n_split), vocab_size(vocab_size), m(m), eos(eos), dsa(dsa),
+    mctx(dsa ? static_cast<const llama_kv_cache_dsa_context *>(mctx_cur)->get_mla() : static_cast<const llama_kv_cache_context *>(mctx_cur)) {
+}
+
+void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
+    if (!ubatch->token) {
+        return;
+    }
+
+    GGML_ASSERT((int32_t) ngram_ids.size() == (n_neighbor - 1)*n_split);
+
+    const int64_t n_tokens = ubatch->n_tokens;
+    const int32_t n_prev   = n_neighbor - 1;
+
+    // a token shared by several sequences has the same history in each, so its first sequence resolves it
+    std::vector<llama_token> prev;
+    mctx->get_prev_tokens(*ubatch, n_prev, prev);
+
+    // shifted[i*n_prev + s - 1]: the token s positions before token i, 0 before the sequence start or when an EOS lies in between
+    std::vector<llama_token> shifted(n_tokens*n_prev, 0);
+    for (int64_t i = 0; i < n_tokens; ++i) {
+        for (int32_t s = 1; s <= n_prev; ++s) {
+            const llama_token t = prev[i*n_prev + n_prev - s];
+            if (t == LLAMA_TOKEN_NULL || t == eos) {
+                break;
+            }
+            shifted[i*n_prev + s - 1] = t;
+        }
+    }
+
+    std::vector<int32_t> ids(n_tokens);
+    for (int32_t ng = 2; ng <= n_neighbor; ++ng) {
+        for (int32_t j = 0; j < n_split; ++j) {
+            const int32_t idx       = (ng - 2)*n_split + j;
+            const int64_t emb_vocab = m + (int64_t) idx*2 + 1;
+
+            for (int64_t i = 0; i < n_tokens; ++i) {
+                int64_t hash = ubatch->token[i];
+                int64_t pw   = 1;
+                for (int32_t s = 1; s < ng; ++s) {
+                    pw    = (pw*vocab_size) % emb_vocab;
+                    hash += (int64_t) shifted[i*n_prev + s - 1]*pw;
+                }
+                ids[i] = (int32_t) (hash % emb_vocab);
+            }
+
+            ggml_backend_tensor_set(ngram_ids[idx], ids.data(), 0, n_tokens*sizeof(int32_t));
+        }
+    }
+}
+
+bool llm_graph_input_ngram::can_reuse(const llm_graph_params & params) {
+    mctx = dsa ? static_cast<const llama_kv_cache_dsa_context *>(params.mctx)->get_mla() : static_cast<const llama_kv_cache_context *>(params.mctx);
+
+    bool res = params.ubatch.token != nullptr;
+    for (const auto * t : ngram_ids) {
+        res &= t->ne[0] == params.ubatch.n_tokens;
+    }
+
+    return res;
 }
 
 //
@@ -3580,12 +3658,14 @@ ggml_tensor * llm_graph_context::build_attn(
 
     // top_k indexes the cells, and the indexer mask of the same type is built the same way
     // let's use it, so when no other layer reads the MLA mask is not allocated
+    // an indexer mask with forced keys carries a +inf bias, so it cannot be reused here
     ggml_tensor * kq_mask = inp->self_attn_mask_mla.raw;
-    if (inp->self_attn_mask_lid.raw->type == kq_mask->type) {
+    if (!inp->forced_keys && inp->self_attn_mask_lid.raw->type == kq_mask->type) {
         kq_mask = inp->self_attn_mask_lid.raw;
     }
 
-    ggml_tensor * kq_mask_top_k = build_top_k_mask(kq_mask, top_k, il);
+    // top_k == nullptr: dense attention over every cell, e.g. while n_kv <= indexer top-k
+    ggml_tensor * kq_mask_top_k = top_k ? build_top_k_mask(kq_mask, top_k, il) : kq_mask;
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
@@ -3594,7 +3674,7 @@ ggml_tensor * llm_graph_context::build_attn(
     const int64_t n_embd_v = v_cur ? v_cur->ne[0] : v_mla->ne[0];
     ggml_tensor * v = ggml_view_4d(ctx0, k, n_embd_v, k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, nullptr, sinks, v_mla, top_k->ne[0], kq_scale, il);
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, nullptr, sinks, v_mla, top_k ? top_k->ne[0] : 0, kq_scale, il);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -3843,6 +3923,7 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
     const llama_kv_cache_dsa_context * mctx_cur) {
 
     auto inp = std::make_unique<llm_graph_input_attn_k_dsa>(hparams, cparams, mctx_cur);
+    inp->forced_keys = hparams.indexer_init_tokens + hparams.indexer_local_tokens > 0;
 
     {
         inp->self_k_idxs_mla = mctx_cur->get_mla()->build_input_k_idxs(ctx0, ubatch);
@@ -3854,8 +3935,9 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
         inp->self_k_idxs_lid = mctx_cur->get_lid()->build_input_k_idxs(ctx0, ubatch);
 
         // ensure that mask type matches fused lightning indexer use (requires f16 mask)
+        // a mask with forced keys holds a +inf bias, so it stays F32 for the unfused scoring path
         auto cparams_copy = cparams;
-        cparams_copy.flash_attn = cparams.fused_lid;
+        cparams_copy.flash_attn = inp->forced_keys ? false : cparams.fused_lid;
 
         inp->self_attn_mask_lid.raw = build_attn_inp_kq_mask(ctx0, mctx_cur->get_lid(), ubatch, cparams_copy);
 

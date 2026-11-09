@@ -2448,6 +2448,9 @@ class TextModel(ModelBase):
         if chkhsh == "5635e1c8d621dff7b4825f41f2f97b6ceb39bcf2d5c541db28577080d6efd5e5":
             # ref: https://huggingface.co/thinkingmachines/Inkling-2-Small
             res = "inkling2"
+        if chkhsh == "27d87c17bcffe5262a1e80b2ceb9a5e002c4f8a17d796fd5afac9180dd8bd96e":
+            # ref: https://huggingface.co/meituan-longcat/LongCat-Flash-Lite
+            res = "longcat"
 
         if res is None:
             logger.warning("\n")
