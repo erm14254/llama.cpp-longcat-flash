@@ -140,6 +140,14 @@ struct llama_hparams {
     uint32_t moe_every_n_layers   = 0;
     uint32_t moe_latent_size      = 0;
 
+    // identity experts (LongCat-Flash)
+    uint32_t n_expert_zero        = 0;
+
+    // n-gram embeddings (LongCat-Flash-Ngram)
+    uint32_t ngram_neighbor_num     = 0;
+    uint32_t ngram_split_num        = 0;
+    uint32_t ngram_vocab_size_ratio = 0;
+
     float f_norm_eps;
     float f_norm_rms_eps;
     float f_norm_group_eps;
@@ -335,6 +343,13 @@ struct llama_hparams {
     uint32_t indexer_kpool_row = 3;
     // pools are consecutive cells in sequence order, not runs of consecutive positions
     bool     indexer_kpool_by_order = false;
+
+    // LongCat-Flash-Sparse LSA: the first init_tokens and the last local_tokens visible keys are always selected
+    uint32_t indexer_init_tokens     = 0;
+    uint32_t indexer_local_tokens    = 0;
+    float    indexer_k_norm_eps      = 1e-6f;
+    bool     indexer_rope_interleave = false;
+
     // MSA
     uint32_t indexer_block_size  = 0;
     uint32_t indexer_local_blocks = 0;

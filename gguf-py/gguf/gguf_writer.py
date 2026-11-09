@@ -841,6 +841,20 @@ class GGUFWriter:
 
     def add_indexer_kpool_select_tail(self, value: bool) -> None:
         self.add_bool(Keys.Attention.Indexer.KPOOL_SELECT_TAIL.format(arch=self.arch), value)
+    def add_indexer_init_tokens(self, count: int) -> None:
+        self.add_uint32(Keys.Attention.Indexer.INIT_TOKENS.format(arch=self.arch), count)
+
+    def add_indexer_local_tokens(self, count: int) -> None:
+        self.add_uint32(Keys.Attention.Indexer.LOCAL_TOKENS.format(arch=self.arch), count)
+
+    def add_indexer_k_norm_type(self, value: str) -> None:
+        self.add_string(Keys.Attention.Indexer.K_NORM_TYPE.format(arch=self.arch), value)
+
+    def add_indexer_k_norm_eps(self, value: float) -> None:
+        self.add_float32(Keys.Attention.Indexer.K_NORM_EPS.format(arch=self.arch), value)
+
+    def add_indexer_rope_interleave(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.Indexer.ROPE_INTERLEAVE.format(arch=self.arch), value)
 
     def add_max_alibi_bias(self, bias: float) -> None:
         self.add_float32(Keys.Attention.MAX_ALIBI_BIAS.format(arch=self.arch), bias)
@@ -913,6 +927,18 @@ class GGUFWriter:
 
     def add_expert_gating_func(self, value: ExpertGatingFuncType) -> None:
         self.add_uint32(Keys.LLM.EXPERT_GATING_FUNC.format(arch=self.arch), value.value)
+
+    def add_expert_zero_count(self, count: int) -> None:
+        self.add_uint32(Keys.LLM.EXPERT_ZERO_COUNT.format(arch=self.arch), count)
+
+    def add_ngram_neighbor_num(self, count: int) -> None:
+        self.add_uint32(Keys.LLM.NGRAM_NEIGHBOR_NUM.format(arch=self.arch), count)
+
+    def add_ngram_split_num(self, count: int) -> None:
+        self.add_uint32(Keys.LLM.NGRAM_SPLIT_NUM.format(arch=self.arch), count)
+
+    def add_ngram_vocab_size_ratio(self, ratio: int) -> None:
+        self.add_uint32(Keys.LLM.NGRAM_VOCAB_SIZE_RATIO.format(arch=self.arch), ratio)
 
     def add_swiglu_clamp_exp(self, values: Sequence[float]) -> None:
         self.add_array(Keys.LLM.SWIGLU_CLAMP_EXP.format(arch=self.arch), values)

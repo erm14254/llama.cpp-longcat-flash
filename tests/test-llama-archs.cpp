@@ -303,7 +303,9 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const 
             || arch == LLM_ARCH_MISTRAL4
             || arch == LLM_ARCH_MISTRAL_LARGE4
             || arch == LLM_ARCH_HY_V4
-            || arch == LLM_ARCH_XING4_0) {
+            || arch == LLM_ARCH_XING4_0
+            || arch == LLM_ARCH_LONGCAT_FLASH_NGRAM
+            || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
         n_embd = 128;
         n_head = 1;
         n_ff   = 192;
@@ -426,7 +428,9 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const 
             || arch == LLM_ARCH_HY_V4
             || arch == LLM_ARCH_MISTRAL4
             || arch == LLM_ARCH_MISTRAL_LARGE4
-            || arch == LLM_ARCH_XING4_0) {
+            || arch == LLM_ARCH_XING4_0
+            || arch == LLM_ARCH_LONGCAT_FLASH_NGRAM
+            || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
         // GLM5 next MLA is nope only, the cache row is the compressed latent alone.
         ms.add_kv(LLM_KV_ATTENTION_KEY_LENGTH,       arch == LLM_ARCH_GLM5_NEXT ? uint32_t(512) : uint32_t(576));
         ms.add_kv(LLM_KV_ATTENTION_VALUE_LENGTH,     uint32_t(512));
@@ -586,6 +590,26 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const 
         ms.add_kv(LLM_KV_EXPERT_WEIGHTS_SCALE,       1.0f);
         ms.add_kv(LLM_KV_EXPERT_WEIGHTS_NORM,        true);
         // layer 0 must own an indexer, the odd layers share it
+        std::vector<uint32_t> indexer_types;
+        indexer_types.reserve(n_layer);
+        for (uint32_t il = 0; il < n_layer; il++) {
+            indexer_types.push_back(il % 2 ? 0 : 1);
+        }
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types);
+    }
+
+    if (arch == LLM_ARCH_LONGCAT_FLASH_NGRAM || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
+        ms.add_kv(LLM_KV_EXPERT_ZERO_COUNT,       uint32_t(2));
+        ms.add_kv(LLM_KV_EXPERT_WEIGHTS_SCALE,    1.0f);
+        ms.add_kv(LLM_KV_NGRAM_NEIGHBOR_NUM,      uint32_t(3));
+        ms.add_kv(LLM_KV_NGRAM_SPLIT_NUM,         uint32_t(2));
+        ms.add_kv(LLM_KV_NGRAM_VOCAB_SIZE_RATIO,  uint32_t(2));
+    }
+    if (arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_INIT_TOKENS,     uint32_t(4));
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_TOKENS,    uint32_t(8));
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_ROPE_INTERLEAVE, true);
+        // layer 0 must own an indexer, the odd layers reuse its top-k
         std::vector<uint32_t> indexer_types;
         indexer_types.reserve(n_layer);
         for (uint32_t il = 0; il < n_layer; il++) {
@@ -1047,6 +1071,8 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_MUSE_SPARK:
         case LLM_ARCH_KOLIBRI1:
         case LLM_ARCH_METIS16:
+        case LLM_ARCH_LONGCAT_FLASH_NGRAM:
+        case LLM_ARCH_LONGCAT_FLASH_SPARSE:
             return true;
         default:
             return false;
@@ -1119,6 +1145,13 @@ static bool arch_supported(const llm_arch arch) {
         return false;
     }
 #endif // GGML_USE_HIP
+
+    // TODO: [TAG_MUL_MAT_ID_SKIP] the LongCat zero experts are negative (skipped) ggml_mul_mat_id ids
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    if (arch == LLM_ARCH_LONGCAT_FLASH_NGRAM || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
+        return false;
+    }
+#endif
 
     return true;
 }

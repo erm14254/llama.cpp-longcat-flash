@@ -134,6 +134,10 @@ class Keys:
         MOE_LATENT_SIZE                   = "{arch}.moe_latent_size"
         POST_NORM_EPS                     = "{arch}.post_norm_epsilon"
         NEXTN_PREDICT_LAYERS              = "{arch}.nextn_predict_layers"
+        EXPERT_ZERO_COUNT                 = "{arch}.expert_zero_count"
+        NGRAM_NEIGHBOR_NUM                = "{arch}.ngram.neighbor_num"
+        NGRAM_SPLIT_NUM                   = "{arch}.ngram.split_num"
+        NGRAM_VOCAB_SIZE_RATIO            = "{arch}.ngram.vocab_size_ratio"
         NUM_DEEPSTACK_LAYERS              = "{arch}.n_deepstack_layers"
         DEEPSTACK_MAPPING                 = "{arch}.deepstack_mapping"
         POOLING_TYPE                      = "{arch}.pooling_type"
@@ -247,6 +251,11 @@ class Keys:
             CANDIDATE_SOURCE_LAYER = "{arch}.attention.indexer.candidate_source_layer"
             CANDIDATE_TOP_K_BLOCKS = "{arch}.attention.indexer.candidate_top_k_blocks"
             CANDIDATE_BLOCK_SIZE   = "{arch}.attention.indexer.candidate_block_size"
+            INIT_TOKENS     = "{arch}.attention.indexer.init_tokens"
+            LOCAL_TOKENS    = "{arch}.attention.indexer.local_tokens"
+            K_NORM_TYPE     = "{arch}.attention.indexer.k_norm_type"
+            K_NORM_EPS      = "{arch}.attention.indexer.k_norm_epsilon"
+            ROPE_INTERLEAVE = "{arch}.attention.indexer.rope_interleave"
 
     class HyperConnection:
         COUNT                = "{arch}.hyper_connection.count"
@@ -761,6 +770,8 @@ class MODEL_ARCH(IntEnum):
     K2HORIZON        = auto()
     KOLIBRI1         = auto()
     LIMITE           = auto()
+    LONGCAT_FLASH_NGRAM = auto()
+    LONGCAT_FLASH_SPARSE = auto()
 
 
 class VISION_PROJECTOR_TYPE(IntEnum):
@@ -1453,6 +1464,10 @@ class MODEL_TENSOR(IntEnum):
     LILICORR_OUT_HEAD             = auto()
     LILICORR_IN_HEAD              = auto()
     LILICORR_ANCHOR_OUT_HEAD      = auto()
+
+    # longcat n-gram
+    NGRAM_EMBD             = auto()  # longcat n-gram embedding tables
+    NGRAM_PROJ             = auto()  # longcat n-gram projection layers
     # lfm2 audio
     A_ENC_NORM_CONV        = auto()
     A_ENC_LINEAR_POS       = auto()
@@ -1680,6 +1695,8 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.K2HORIZON:        "k2-horizon",
     MODEL_ARCH.KOLIBRI1:         "kolibri1",
     MODEL_ARCH.LIMITE:           "limite",
+    MODEL_ARCH.LONGCAT_FLASH_NGRAM: "longcat-flash-ngram",
+    MODEL_ARCH.LONGCAT_FLASH_SPARSE: "longcat-flash-sparse",
 }
 
 VISION_PROJECTOR_TYPE_NAMES: dict[VISION_PROJECTOR_TYPE, str] = {
@@ -2415,6 +2432,8 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.D2T:                       "d2t",
     MODEL_TENSOR.ATTN_V_GATE:               "blk.{bid}.attn_v_gate",
     MODEL_TENSOR.ATTN_V_EXP:                "blk.{bid}.attn_v_exps",
+    MODEL_TENSOR.NGRAM_EMBD:                "ngram_embd.{bid}",
+    MODEL_TENSOR.NGRAM_PROJ:                "ngram_proj.{bid}",
 }
 
 MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
@@ -4743,6 +4762,41 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_DOWN_SHEXP,
         MODEL_TENSOR.FFN_UP_SHEXP,
     ],
+    MODEL_ARCH.LONGCAT_FLASH_NGRAM: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q_A,
+        MODEL_TENSOR.ATTN_Q_B,
+        MODEL_TENSOR.ATTN_KV_A_MQA,
+        MODEL_TENSOR.ATTN_K_B,
+        MODEL_TENSOR.ATTN_V_B,
+        MODEL_TENSOR.ATTN_Q_A_NORM,
+        MODEL_TENSOR.ATTN_KV_A_NORM,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+        MODEL_TENSOR.FFN_GATE_SHEXP,
+        MODEL_TENSOR.FFN_DOWN_SHEXP,
+        MODEL_TENSOR.FFN_UP_SHEXP,
+        MODEL_TENSOR.FFN_EXP_PROBS_B,
+        MODEL_TENSOR.NGRAM_EMBD,
+        MODEL_TENSOR.NGRAM_PROJ,
+        # NextN/MTP tensors
+        MODEL_TENSOR.NEXTN_EH_PROJ,
+        MODEL_TENSOR.NEXTN_EMBED_TOKENS,
+        MODEL_TENSOR.NEXTN_ENORM,
+        MODEL_TENSOR.NEXTN_HNORM,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
+        MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
+    ],
     MODEL_ARCH.ERNIE4_5_MOE: [
         MODEL_TENSOR.TOKEN_EMBD,
         MODEL_TENSOR.OUTPUT_NORM,
@@ -6744,6 +6798,15 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.MUDD_UP,
     ],
 }
+
+# LongCat-Flash-Sparse: LongCat-Flash-Ngram plus the indexer
+MODEL_TENSORS[MODEL_ARCH.LONGCAT_FLASH_SPARSE] = [
+    *MODEL_TENSORS[MODEL_ARCH.LONGCAT_FLASH_NGRAM],
+    MODEL_TENSOR.INDEXER_K_NORM,
+    MODEL_TENSOR.INDEXER_PROJ,
+    MODEL_TENSOR.INDEXER_ATTN_K,
+    MODEL_TENSOR.INDEXER_ATTN_Q_B,
+]
 
 # tensors that will not be serialized
 MODEL_TENSOR_SKIP: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {

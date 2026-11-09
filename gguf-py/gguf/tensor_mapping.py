@@ -1357,6 +1357,14 @@ class TensorNameMap:
             "layers.{bid}.attention.kv_a_norm",            # mistral-large
         ),
 
+        MODEL_TENSOR.NGRAM_EMBD: (
+            "model.ngram_embeddings.embedders.{bid}",  # longcat-flash-ngram
+        ),
+
+        MODEL_TENSOR.NGRAM_PROJ: (
+            "model.ngram_embeddings.post_projs.{bid}",  # longcat-flash-ngram
+        ),
+
         MODEL_TENSOR.ATTN_SUB_NORM: (
             "model.layers.{bid}.self_attn.inner_attn_ln",  # bitnet
         ),

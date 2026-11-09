@@ -229,6 +229,10 @@ void llama_model_saver::add_kv_from_model() {
     add_kv(LLM_KV_EXPERT_GROUP_SCALE,                hparams.expert_group_scale);
     add_kv(LLM_KV_EXPERTS_PER_GROUP,                 hparams.n_group_experts);
     add_kv(LLM_KV_MOE_EVERY_N_LAYERS,                hparams.moe_every_n_layers);
+    add_kv(LLM_KV_EXPERT_ZERO_COUNT,                 hparams.n_expert_zero);
+    add_kv(LLM_KV_NGRAM_NEIGHBOR_NUM,                hparams.ngram_neighbor_num);
+    add_kv(LLM_KV_NGRAM_SPLIT_NUM,                   hparams.ngram_split_num);
+    add_kv(LLM_KV_NGRAM_VOCAB_SIZE_RATIO,            hparams.ngram_vocab_size_ratio);
     add_kv(LLM_KV_NEXTN_PREDICT_LAYERS,              hparams.n_layer_nextn);
     add_kv(LLM_KV_NUM_DEEPSTACK_LAYERS,              hparams.n_deepstack_layers);
     add_kv(LLM_KV_DEEPSTACK_MAPPING,                 hparams.deepstack_mapping_arr);
@@ -315,6 +319,10 @@ void llama_model_saver::add_kv_from_model() {
     add_kv(LLM_KV_ATTENTION_INDEXER_KPOOL,           hparams.indexer_kpool);
     add_kv(LLM_KV_ATTENTION_INDEXER_KPOOL_SELECT_TAIL, hparams.indexer_kpool_select_tail);
     add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS,    hparams.indexer_local_blocks);
+    add_kv(LLM_KV_ATTENTION_INDEXER_INIT_TOKENS,     hparams.indexer_init_tokens);
+    add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_TOKENS,    hparams.indexer_local_tokens);
+    add_kv(LLM_KV_ATTENTION_INDEXER_K_NORM_EPS,      hparams.indexer_k_norm_eps);
+    add_kv(LLM_KV_ATTENTION_INDEXER_ROPE_INTERLEAVE, hparams.indexer_rope_interleave);
     add_kv(LLM_KV_ATTENTION_INDEXER_TYPES,           hparams.is_indexer_full_impl, true);
     if (hparams.n_layer_kv_from_start >= 0) {
         add_kv(LLM_KV_ATTENTION_SHARED_KV_LAYERS,    uint32_t(hparams.n_layer_all - hparams.n_layer_kv_from_start));
@@ -555,6 +563,12 @@ void llama_model_saver::add_tensors_from_model() {
     add_tensor(model->cont_hidden_b);
     add_tensor(model->cont_output);
     add_tensor(model->cont_output_b);
+    for (const ggml_tensor * t : model->ngram_embd) {
+        add_tensor(t);
+    }
+    for (const ggml_tensor * t : model->ngram_proj) {
+        add_tensor(t);
+    }
     add_tensor(model->hc_head_fn);
     add_tensor(model->hc_head_base);
     add_tensor(model->hc_head_scale);

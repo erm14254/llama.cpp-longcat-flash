@@ -245,6 +245,7 @@ public:
     void set_input_k_shift(ggml_tensor * dst) const;
 
     void set_input_attn_mask (const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_longcat_lsa_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     // true if llama_kv_cell_ext holds information that has to survive a state save/restore
@@ -443,6 +444,7 @@ public:
 
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_attn_mask (const llm_attn_mask & attn_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_longcat_lsa_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     // see llama_kv_cache::get_prev_tokens()

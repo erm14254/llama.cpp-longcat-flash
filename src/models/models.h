@@ -485,6 +485,29 @@ struct llama_model_nanbeige : public llama_model_base {
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
 
+struct llama_model_longcat_flash_ngram : public llama_model_base {
+    llama_model_longcat_flash_ngram(const struct llama_model_params & params) : llama_model_base(params) {}
+
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+
+    struct graph : public llm_graph_context {
+        graph(const llama_model & model, const llm_graph_params & params);
+    };
+
+    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+};
+
+// shares the graph of llama_model_longcat_flash_ngram
+struct llama_model_longcat_flash_sparse : public llama_model_longcat_flash_ngram {
+    llama_model_longcat_flash_sparse(const struct llama_model_params & params) : llama_model_longcat_flash_ngram(params) {}
+
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+
+    llama_rope_params get_rope_params_indexer(const llama_cparams & cparams, int il) const override;
+};
+
 struct llama_model_qwen : public llama_model_base {
     llama_model_qwen(const struct llama_model_params & params) : llama_model_base(params) {}
     void load_arch_hparams(llama_model_loader & ml) override;

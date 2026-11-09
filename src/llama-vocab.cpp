@@ -397,6 +397,14 @@ struct llm_tokenizer_bpe : llm_tokenizer {
                     "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
                 };
                 break;
+            case LLAMA_VOCAB_PRE_TYPE_LONGCAT:
+                regex_exprs = {
+                    // LongCat tokenizer.json: Qwen2-style split, then CJK punctuation and script splits.
+                    "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+                    " ?[！-／：-～‘-‟　-。《》「」【】]+",
+                    "[一-龥ࠀ-一가-퟿]+",
+                };
+                break;
             case LLAMA_VOCAB_PRE_TYPE_QWEN35:
                 regex_exprs = {
                     // original regex from tokenizer.json
@@ -2580,6 +2588,10 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_QWEN2;
                 clean_spaces = false;
             } else if (
+                    tokenizer_pre == "longcat") {
+                pre_type = LLAMA_VOCAB_PRE_TYPE_LONGCAT;
+                clean_spaces = false;
+            } else if (
                     tokenizer_pre == "qwen35") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_QWEN35;
                 clean_spaces = false;
@@ -3277,6 +3289,7 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                     || t.first == "<|calls|>"  // solar-open
                     || t.first == "<end_of_turn>"
                     || t.first == "<|endoftext|>"
+                    || t.first == "</longcat_s>" // LongCat EOS
                     || t.first == "</s>"      // paddleocr
                     || t.first == "<|eom_id|>"
                     || t.first == "<EOT>"
