@@ -927,7 +927,8 @@ static bool tensor_requires_imatrix(const char * tensor_name, const ggml_type ds
         return false;
     }
     // the LongCat n-gram embedding tables are only read with GGML_OP_GET_ROWS, so the imatrix never covers them
-    if (std::strncmp(tensor_name, "ngram_embd.", 11) == 0) {
+    // (the types that cannot be quantized without an imatrix at all keep the error)
+    if (std::strncmp(tensor_name, "ngram_embd.", 11) == 0 && !ggml_quantize_requires_imatrix(dst_type)) {
         return false;
     }
     switch (dst_type) {

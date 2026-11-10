@@ -349,7 +349,12 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
                     indexer_score = ggml_cont(ctx0, ggml_permute(ctx0, indexer_score, 2, 1, 0, 3));
 
                     // the LSA mask holds -inf for the invisible keys and +inf for the forced sink and local keys
-                    indexer_score = ggml_add(ctx0, indexer_score, inp_attn_dsa->self_attn_mask_lid.raw);
+                    // the mask is F16 when it has no forced keys and the indexer mask is built for the fused path
+                    ggml_tensor * lid_mask = inp_attn_dsa->self_attn_mask_lid.raw;
+                    if (lid_mask->type != GGML_TYPE_F32) {
+                        lid_mask = ggml_cast(ctx0, lid_mask, GGML_TYPE_F32);
+                    }
+                    indexer_score = ggml_add(ctx0, indexer_score, lid_mask);
                     cb(indexer_score, "indexer_score", il);
 
                     top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_indexer_top_k));

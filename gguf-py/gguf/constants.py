@@ -6837,7 +6837,6 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
     ],
 }
 
-# LongCat-Flash-Sparse: LongCat-Flash-Ngram plus the indexer
 # tensors that will not be serialized
 MODEL_TENSOR_SKIP: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
     MODEL_ARCH.LLAMA: [
