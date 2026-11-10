@@ -15,6 +15,9 @@ struct llama_kv_cell_ext {
     llama_pos x = 0;
     llama_pos y = 0;
 
+    // token id of the cell, LLAMA_TOKEN_NULL if unknown (used by the LongCat n-gram embedding lookback)
+    llama_token tok = LLAMA_TOKEN_NULL;
+
     // return true if the current 2D spatial position is greater than other
     bool is_2d_gt(llama_pos ox, llama_pos oy) const {
         return (y > oy) || (y == oy && x > ox);
@@ -23,7 +26,7 @@ struct llama_kv_cell_ext {
     void reset() {
         static_assert(std::is_trivially_copyable_v<llama_kv_cell_ext>);
 
-        memset(this, 0, sizeof(*this));
+        *this = llama_kv_cell_ext{};
     }
 };
 

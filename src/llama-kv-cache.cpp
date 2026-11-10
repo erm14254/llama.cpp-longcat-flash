@@ -1126,11 +1126,15 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 
             cells.pos_set(idx, ubatch.pos[i]);
 
-            if (ubatch.is_pos_2d()) {
-                llama_kv_cell_ext ext {
-                    /*.x =*/ ubatch.pos[i + ubatch.n_tokens*2],
-                    /*.y =*/ ubatch.pos[i + ubatch.n_tokens],
-                };
+            if (ubatch.is_pos_2d() || ubatch.token) {
+                llama_kv_cell_ext ext;
+                if (ubatch.is_pos_2d()) {
+                    ext.x = ubatch.pos[i + ubatch.n_tokens*2];
+                    ext.y = ubatch.pos[i + ubatch.n_tokens];
+                }
+                if (ubatch.token) {
+                    ext.tok = ubatch.token[i];
+                }
                 cells.ext_set(idx, ext);
             }
 
@@ -1165,6 +1169,26 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
         auto & head = v_heads[sinfo.strm[s]];
 
         head = sinfo.idxs[s].back() + 1;
+    }
+}
+
+bool llama_kv_cache::has_cell_ext() const {
+    // M-RoPE needs the 2D position, the LongCat n-gram embedding needs the token id
+    return hparams.n_pos_per_embd() > 1 || hparams.ngram_neighbor_num > 0;
+}
+
+void llama_kv_cache::get_seq_tokens(llama_seq_id seq_id, llama_pos p0, llama_pos p1, std::map<llama_pos, llama_token> & res) const {
+    const auto & cells = v_cells[seq_to_stream[seq_id]];
+
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (cells.is_empty(i) || !cells.seq_has(i, seq_id) || !cells.pos_in(i, p0, p1 + 1)) {
+            continue;
+        }
+
+        const llama_token tok = cells.ext_get(i).tok;
+        if (tok != LLAMA_TOKEN_NULL) {
+            res[cells.pos_get(i)] = tok;
+        }
     }
 }
 
@@ -2229,7 +2253,7 @@ void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t
             io.write(&pos,      sizeof(pos));
             io.write(&n_seq_id, sizeof(n_seq_id));
 
-            if (hparams.n_pos_per_embd() > 1) {
+            if (has_cell_ext()) {
                 const llama_kv_cell_ext ext = cells.ext_get(i);
                 io.write(&ext, sizeof(ext));
             }
@@ -2354,6 +2378,8 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
         ubatch.seq_id_unq[0] = dest_seq_id;
 
+        std::vector<llama_token> toks(cell_count, LLAMA_TOKEN_NULL);
+
         for (uint32_t i = 0; i < cell_count; ++i) {
             llama_pos pos;
             uint32_t n_seq_id;
@@ -2366,12 +2392,16 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
                 return false;
             }
 
-            if (hparams.n_pos_per_embd() > 1) {
+            if (has_cell_ext()) {
                 llama_kv_cell_ext ext;
                 io.read(&ext, sizeof(ext));
 
-                ubatch.pos[i + ubatch.n_tokens]   = ext.y;
-                ubatch.pos[i + ubatch.n_tokens*2] = ext.x;
+                if (hparams.n_pos_per_embd() > 1) {
+                    ubatch.pos[i + ubatch.n_tokens]   = ext.y;
+                    ubatch.pos[i + ubatch.n_tokens*2] = ext.x;
+                }
+
+                toks[i] = ext.tok;
             }
 
             // read the sequence id, but directly discard it - we will use dest_seq_id instead
@@ -2394,6 +2424,17 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
         // TODO: we cannot yet restore llama_kv_cell_ext as the apply_ubatch() does not support it yet
         //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
         apply_ubatch(sinfo, ubatch);
+
+        // the restore ubatch carries no token ids, put the saved ones back into the cells
+        if (has_cell_ext()) {
+            for (uint32_t i = 0; i < cell_count; ++i) {
+                const uint32_t idx = sinfo.idxs[0][i];
+
+                llama_kv_cell_ext ext = cells.ext_get(idx);
+                ext.tok = toks[i];
+                cells.ext_set(idx, ext);
+            }
+        }
 
         LLAMA_LOG_DEBUG("%s: cell_count = %d, dest_seq_id = %d\n", __func__, cell_count, dest_seq_id);
 
@@ -2424,7 +2465,7 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
             cells.pos_set(i, pos);
 
-            if (hparams.n_pos_per_embd() > 1) {
+            if (has_cell_ext()) {
                 llama_kv_cell_ext ext;
                 io.read(&ext, sizeof(ext));
                 cells.ext_set(i, ext);
@@ -2775,6 +2816,14 @@ void llama_kv_cache_context::set_input_longcat_lsa_mask(
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     kv->set_input_pos_bucket(dst, ubatch);
+}
+
+bool llama_kv_cache_context::has_cell_ext() const {
+    return kv->has_cell_ext();
+}
+
+void llama_kv_cache_context::get_seq_tokens(llama_seq_id seq_id, llama_pos p0, llama_pos p1, std::map<llama_pos, llama_token> & res) const {
+    kv->get_seq_tokens(seq_id, p0, p1, res);
 }
 
 void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {

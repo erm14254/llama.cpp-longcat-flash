@@ -221,6 +221,12 @@ public:
             uint32_t num_local_tokens) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
+    // true if llama_kv_cell_ext holds information that has to survive a state save/restore
+    bool has_cell_ext() const;
+
+    // tokens of sequence seq_id at the positions [p0, p1] that are in the cache
+    void get_seq_tokens(llama_seq_id seq_id, llama_pos p0, llama_pos p1, std::map<llama_pos, llama_token> & res) const;
+
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
 
@@ -407,6 +413,12 @@ public:
             uint32_t num_init_tokens,
             uint32_t num_local_tokens) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+
+    // true if llama_kv_cell_ext holds information that has to survive a state save/restore
+    bool has_cell_ext() const;
+
+    // tokens of sequence seq_id at the positions [p0, p1] that are in the cache
+    void get_seq_tokens(llama_seq_id seq_id, llama_pos p0, llama_pos p1, std::map<llama_pos, llama_token> & res) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;

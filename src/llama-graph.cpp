@@ -1394,6 +1394,21 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
         return false;
     };
 
+    // tokens of each sequence from n - 1 positions before its first ubatch position, read from the KV cache cells
+    std::map<llama_seq_id, std::map<llama_pos, llama_token>> kv_tokens;
+    if (mctx) {
+        std::map<llama_seq_id, llama_pos> last_pos;
+        for (int64_t i = 0; i < n_tokens; ++i) {
+            for (int32_t s = 0; s < ubatch->n_seq_id[i]; ++s) {
+                auto & lp = last_pos.emplace(ubatch->seq_id[i][s], ubatch->pos[i]).first->second;
+                lp = std::max(lp, ubatch->pos[i]);
+            }
+        }
+        for (const auto & [seq_id, pos_first] : first_pos) {
+            mctx->get_seq_tokens(seq_id, pos_first - (n - 1), last_pos[seq_id], kv_tokens[seq_id]);
+        }
+    }
+
     auto token_at = [&](int64_t row, llama_seq_id seq_id, llama_pos pos) {
         // Earlier rows in this same decode take precedence over persistent
         // history. This preserves ordinary multi-token prompt processing.
@@ -1401,6 +1416,12 @@ void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
             if (ubatch->pos[r] == pos && row_has_seq(r, seq_id)) {
                 return ubatch->token[r];
             }
+        }
+
+        if (mctx) {
+            const auto & toks = kv_tokens[seq_id];
+            const auto it = toks.find(pos);
+            return it != toks.end() ? it->second : (llama_token) 0;
         }
 
         const auto hist_it = token_history->find(seq_id);

@@ -544,6 +544,11 @@ llama_model_longcat_flash_ngram::graph::graph(
             (int32_t)vocab_size, m, eos_token_id,
             &res->ngram_token_history);
 
+        // the tokens before the ubatch come from the KV cache cells (the MLA cache for the sparse model)
+        inp->mctx = longcat_lsa
+            ? static_cast<const llama_kv_cache_dsa_context *>(mctx)->get_mla()
+            : static_cast<const llama_kv_cache_context *>(mctx);
+
         for (uint32_t j = 0; j < n_ngram; j++) {
             inp->ngram_ids[j] = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
             ggml_set_input(inp->ngram_ids[j]);

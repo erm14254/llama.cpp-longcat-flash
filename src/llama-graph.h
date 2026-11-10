@@ -783,6 +783,10 @@ public:
     const int32_t eos_token_id;
 
     llm_ngram_token_history * token_history;
+
+    // when set, the tokens before the ubatch come from the KV cache cells, so they follow seq_rm / seq_cp / seq_add and
+    // state restore; token_history is then only kept up to date (it is used when there is no memory, e.g. in tests)
+    const llama_kv_cache_context * mctx = nullptr;
 };
 
 //
