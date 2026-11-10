@@ -37,6 +37,8 @@ void llama_model_longcat_flash_sparse::load_arch_tensors(llama_model_loader & ml
 
     const int64_t q_lora_rank = hparams.n_lora_q;
 
+    const auto nf = nextn_flags(ml);
+
     // the NextN/MTP block also owns an indexer, it is not loaded since the MTP head attends densely
     for (int i = 0; i < n_layer_all; ++i) {
         const bool is_nextn = i >= n_layer;
@@ -45,7 +47,7 @@ void llama_model_longcat_flash_sparse::load_arch_tensors(llama_model_loader & ml
             continue;
         }
 
-        const int flags = is_nextn ? (TENSOR_NOT_REQUIRED | TENSOR_SKIP) : 0;
+        const int flags = is_nextn ? (TENSOR_NOT_REQUIRED | TENSOR_SKIP) : nf.trunk;
 
         auto & layer = layers[i];
 

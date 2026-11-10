@@ -102,6 +102,9 @@ void llama_model_longcat_flash_ngram::load_arch_tensors(llama_model_loader & ml)
         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
     }
 
+    // flags of the trunk and of the NextN/MTP block, which is stored after the trunk
+    const auto nf = nextn_flags(ml);
+
     // n-gram embedding j has (ngram_vocab_size_ratio * n_vocab + 2*j + 1) rows
     {
         const uint32_t n_ngram = (hparams.ngram_neighbor_num - 1) * hparams.ngram_split_num;
@@ -114,14 +117,11 @@ void llama_model_longcat_flash_ngram::load_arch_tensors(llama_model_loader & ml)
 
         for (uint32_t j = 0; j < n_ngram; ++j) {
             // token-indexed like tok_embd, so the tables stay with the input instead of on the device of layer j
-            ngram_embd[j] = create_tensor_input(tn(LLM_TENSOR_NGRAM_EMBD, "weight", j), {n_embd_ngram, ngram_m + 2*j + 1}, 0);
-            ngram_proj[j] = create_tensor(tn(LLM_TENSOR_NGRAM_PROJ, "weight", j), {n_embd_ngram, n_embd}, 0);
+            ngram_embd[j] = create_tensor_input(tn(LLM_TENSOR_NGRAM_EMBD, "weight", j), {n_embd_ngram, ngram_m + 2*j + 1}, nf.trunk);
+            ngram_proj[j] = create_tensor(tn(LLM_TENSOR_NGRAM_PROJ, "weight", j), {n_embd_ngram, n_embd}, nf.trunk);
         }
     }
 
-    const auto nf = nextn_flags(ml);
-
-    // the NextN/MTP block is stored after the trunk
     for (int i = 0; i < n_layer_all; ++i) {
         auto & layer = layers[i];
 
@@ -663,6 +663,4 @@ llama_model_longcat_flash_ngram::graph_mtp::graph_mtp(const llama_model & model,
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
-
-    ggml_build_forward_expand(gf, cur);
 }
