@@ -4,12 +4,13 @@
 
 namespace {
 
-// the router also picks n_expert_zero identity ("zero") experts: their ids become -1 (skipped by ggml_mul_mat_id)
-// and their weights are summed into identity_weight, which scales the input instead
+// the router picks n_expert_used of n_expert real experts plus n_expert_zero identity ("zero") experts
+// the expert matmuls always get the top n_expert_used real experts, so the ids are valid and distinct on every backend:
+// if the overall top-k holds m real experts, the first m of them get their weight and the rest 0, the zero experts scale the input
 struct longcat_moe_route {
-    ggml_tensor * ids;             // I32 [n_expert_used, n_tokens], -1 for zero experts
-    ggml_tensor * weights;         // F32 [1, n_expert_used, n_tokens], 0 for zero experts
-    ggml_tensor * identity_weight; // F32 [1, n_tokens], summed weight of the zero experts
+    ggml_tensor * ids;             // I32 [n_expert_used, n_tokens], top real experts
+    ggml_tensor * weights;         // F32 [1, n_expert_used, n_tokens], 0 past the m real experts of the overall top-k
+    ggml_tensor * identity_weight; // F32 [1, n_tokens], summed weight of the selected zero experts
 };
 
 longcat_moe_route build_longcat_moe_route(
@@ -27,26 +28,36 @@ longcat_moe_route build_longcat_moe_route(
     // the correction bias only affects the selection, the weights come from the unbiased probabilities
     ggml_tensor * selection_probs = exp_probs_b ? ggml_add(ctx, probs, exp_probs_b) : probs;
 
-    ggml_tensor * selected = ggml_argsort_top_k(ctx, selection_probs, n_expert_used);
+    ggml_tensor * probs_3d = ggml_reshape_3d(ctx, probs, 1, n_expert_total, n_tokens);
 
-    ggml_tensor * weights = ggml_get_rows(ctx, ggml_reshape_3d(ctx, probs, 1, n_expert_total, n_tokens), selected);
-    weights = ggml_scale(ctx, weights, expert_weights_scale);
+    // overall top-k over the real and the zero experts
+    ggml_tensor * selected   = ggml_argsort_top_k(ctx, selection_probs, n_expert_used);
+    ggml_tensor * selected_f = ggml_cast(ctx, selected, GGML_TYPE_F32);
 
     // is_zero = 1 for ids >= n_expert, 0 otherwise
-    ggml_tensor * selected_f = ggml_cast(ctx, selected, GGML_TYPE_F32);
-    ggml_tensor * is_zero    = ggml_step(ctx, ggml_scale_bias(ctx, selected_f, 1.0f, 0.5f - (float) n_expert));
-    ggml_tensor * is_real    = ggml_scale_bias(ctx, is_zero, -1.0f, 1.0f);
+    ggml_tensor * is_zero = ggml_step(ctx, ggml_scale_bias(ctx, selected_f, 1.0f, 0.5f - (float) n_expert));
+
+    ggml_tensor * selected_w = ggml_scale(ctx, ggml_get_rows(ctx, probs_3d, selected), expert_weights_scale);
 
     longcat_moe_route res;
 
     res.identity_weight = ggml_sum_rows(ctx, ggml_reshape_2d(ctx,
-            ggml_mul(ctx, weights, ggml_reshape_3d(ctx, is_zero, 1, n_expert_used, n_tokens)),
+            ggml_mul(ctx, selected_w, ggml_reshape_3d(ctx, is_zero, 1, n_expert_used, n_tokens)),
             n_expert_used, n_tokens));
 
-    res.weights = ggml_mul(ctx, weights, ggml_reshape_3d(ctx, is_real, 1, n_expert_used, n_tokens));
+    // top-k over the real experts only: its first m entries are the real experts of the overall top-k, in the same order
+    ggml_tensor * selection_real = ggml_cont(ctx, ggml_view_2d(ctx, selection_probs, n_expert, n_tokens, selection_probs->nb[1], 0));
 
-    // id for the real experts, -1 for the zero experts
-    res.ids = ggml_cast(ctx, ggml_sub(ctx, ggml_mul(ctx, selected_f, is_real), is_zero), GGML_TYPE_I32);
+    res.ids = ggml_argsort_top_k(ctx, selection_real, n_expert_used);
+
+    // keep[j] = 1 for j < m, with m = n_expert_used - (number of selected zero experts)
+    ggml_tensor * n_real = ggml_scale_bias(ctx, ggml_sum_rows(ctx, is_zero), -1.0f, (float) n_expert_used); // [1, n_tokens]
+    ggml_tensor * slot   = ggml_reshape_3d(ctx, ggml_arange(ctx, 0.0f, (float) n_expert_used, 1.0f), 1, n_expert_used, 1);
+    ggml_tensor * keep   = ggml_step(ctx, ggml_scale_bias(ctx,
+            ggml_sub(ctx, ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, n_real, 1, 1, n_tokens), 1, n_expert_used, n_tokens, 1), slot),
+            1.0f, -0.5f));
+
+    res.weights = ggml_mul(ctx, ggml_scale(ctx, ggml_get_rows(ctx, probs_3d, res.ids), expert_weights_scale), keep);
 
     return res;
 }
@@ -402,7 +413,8 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
             q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
             cb(q_nope, "q_nope_absorbed", il);
 
-            ggml_tensor * Qcur = ggml_concat(ctx0, q_nope, q_pe, 0);
+            // the absorbed query exceeds the F16 range, so it is scaled here, in F32, and not inside the attention
+            ggml_tensor * Qcur = ggml_scale(ctx0, ggml_concat(ctx0, q_nope, q_pe, 0), kq_scale);
             cb(Qcur, "Qcur", il);
 
             kv_cmpr = ggml_reshape_3d(ctx0, kv_cmpr, kv_lora_rank, 1, n_tokens);
@@ -416,11 +428,11 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
             if (use_lsa) {
                 cur = build_attn(inp_attn_dsa,
                         model.layers[il].wo, NULL, model.layers[il].wo_s,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, top_k, kq_scale, il);
+                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, top_k, 1.0f, il);
             } else {
                 cur = build_attn(inp_attn_k,
                         model.layers[il].wo, NULL, model.layers[il].wo_s,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
+                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, 1.0f, il);
             }
         }
 

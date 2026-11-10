@@ -1148,13 +1148,6 @@ static bool arch_supported(const llm_arch arch) {
     }
 #endif // GGML_USE_HIP
 
-    // TODO: [TAG_MUL_MAT_ID_SKIP] the LongCat zero experts are negative (skipped) ggml_mul_mat_id ids
-#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
-    if (arch == LLM_ARCH_LONGCAT_FLASH_NGRAM || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
-        return false;
-    }
-#endif // defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
-
     return true;
 }
 

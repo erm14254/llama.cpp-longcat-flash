@@ -1469,6 +1469,8 @@ bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
         case LLM_ARCH_DOTS3NOTE:
         case LLM_ARCH_XING4_0:
         case LLM_ARCH_GLM_DSA:
+        case LLM_ARCH_LONGCAT_FLASH_NGRAM:
+        case LLM_ARCH_LONGCAT_FLASH_SPARSE:
         case LLM_ARCH_BITNET:
         case LLM_ARCH_T5:
         case LLM_ARCH_NEMOTRON_H:
