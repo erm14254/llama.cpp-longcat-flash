@@ -76,7 +76,7 @@ void llama_model_longcat_flash_ngram::load_arch_hparams(llama_model_loader & ml)
     }
 
     switch (hparams.n_layer()) {
-        case 28: type = LLM_TYPE_65B; break; // 14 layers, each split into two attention blocks
+        case 28: type = LLM_TYPE_68B_A3B; break; // 14 layers, each split into two attention blocks
         default: type = LLM_TYPE_UNKNOWN;
     }
 }
