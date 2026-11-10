@@ -734,10 +734,10 @@ void llm_graph_input_attn_k_dsa::set_input(const llama_ubatch * ubatch) {
 
     mctx->get_lid()->set_input_k_idxs(self_k_idxs_lid, ubatch);
 
-    if (longcat_lsa) {
-        // while n_kv <= indexer top-k the indexer scores are not computed and this mask has no buffer
+    if (forced_keys) {
+        // the mask has no buffer when the graph does not compute the indexer scores
         if (self_attn_mask_lid.raw->buffer) {
-            mctx->get_lid()->set_input_longcat_lsa_mask(self_attn_mask_lid.raw, ubatch, cparams.causal_attn,
+            mctx->get_lid()->set_input_attn_mask_forced_keys(self_attn_mask_lid.raw, ubatch, cparams.causal_attn,
                     hparams.indexer_init_tokens, hparams.indexer_local_tokens);
         }
     } else {
@@ -1406,186 +1406,74 @@ bool llm_graph_input_sampling::can_reuse(const llm_graph_params & params) {
     return true;
 }
 
+llm_graph_input_ngram::llm_graph_input_ngram(
+        int32_t n_neighbor,
+        int32_t n_split,
+        int32_t vocab_size,
+        int64_t m,
+        llama_token eos,
+        bool dsa,
+        const llama_memory_context_i * mctx_cur) :
+    n_neighbor(n_neighbor), n_split(n_split), vocab_size(vocab_size), m(m), eos(eos), dsa(dsa),
+    mctx(dsa ? static_cast<const llama_kv_cache_dsa_context *>(mctx_cur)->get_mla() : static_cast<const llama_kv_cache_context *>(mctx_cur)) {
+}
 
 void llm_graph_input_ngram::set_input(const llama_ubatch * ubatch) {
     if (!ubatch->token) {
         return;
     }
 
-    GGML_ASSERT(token_history);
-    GGML_ASSERT(ubatch->pos);
-    GGML_ASSERT(ubatch->seq_id);
-    GGML_ASSERT(ubatch->n_seq_id);
+    GGML_ASSERT((int32_t) ngram_ids.size() == (n_neighbor - 1)*n_split);
 
     const int64_t n_tokens = ubatch->n_tokens;
-    const int32_t n = n_neighbor;
-    const int32_t k = n_split;
+    const int32_t n_prev   = n_neighbor - 1;
 
-    // Reconcile speculative rollback before computing hashes. Target
-    // verification evaluates sampled + draft tokens together. Rejected draft
-    // KV is removed later, so the next decode starts again at the rejected
-    // token's position. Removing stored entries at and after that position
-    // makes this history follow the same rollback.
-    std::map<llama_seq_id, llama_pos> first_pos;
+    // a token shared by several sequences has the same history in each, so its first sequence resolves it
+    std::vector<llama_token> prev;
+    mctx->get_prev_tokens(*ubatch, n_prev, prev);
+
+    // shifted[i*n_prev + s - 1]: the token s positions before token i, 0 before the sequence start or when an EOS lies in between
+    std::vector<llama_token> shifted(n_tokens*n_prev, 0);
     for (int64_t i = 0; i < n_tokens; ++i) {
-        GGML_ASSERT(ubatch->n_seq_id[i] > 0);
-        for (int32_t s = 0; s < ubatch->n_seq_id[i]; ++s) {
-            const llama_seq_id seq_id = ubatch->seq_id[i][s];
-            const llama_pos pos = ubatch->pos[i];
-
-            auto it = first_pos.find(seq_id);
-            if (it == first_pos.end()) {
-                first_pos.emplace(seq_id, pos);
-            } else {
-                it->second = std::min(it->second, pos);
+        for (int32_t s = 1; s <= n_prev; ++s) {
+            const llama_token t = prev[i*n_prev + n_prev - s];
+            if (t == LLAMA_TOKEN_NULL || t == eos) {
+                break;
             }
+            shifted[i*n_prev + s - 1] = t;
         }
     }
 
-    for (const auto & [seq_id, pos_first] : first_pos) {
-        auto & hist = (*token_history)[seq_id];
-        while (!hist.empty() && hist.back().first >= pos_first) {
-            hist.pop_back();
-        }
-        while ((int32_t) hist.size() > n - 1) {
-            hist.pop_front();
-        }
-    }
+    std::vector<int32_t> ids(n_tokens);
+    for (int32_t ng = 2; ng <= n_neighbor; ++ng) {
+        for (int32_t j = 0; j < n_split; ++j) {
+            const int32_t idx       = (ng - 2)*n_split + j;
+            const int64_t emb_vocab = m + (int64_t) idx*2 + 1;
 
-    auto row_has_seq = [&](int64_t row, llama_seq_id seq_id) {
-        for (int32_t s = 0; s < ubatch->n_seq_id[row]; ++s) {
-            if (ubatch->seq_id[row][s] == seq_id) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    auto token_at = [&](int64_t row, llama_seq_id seq_id, llama_pos pos) {
-        // Earlier rows in this same decode take precedence over persistent
-        // history. This preserves ordinary multi-token prompt processing.
-        for (int64_t r = row - 1; r >= 0; --r) {
-            if (ubatch->pos[r] == pos && row_has_seq(r, seq_id)) {
-                return ubatch->token[r];
-            }
-        }
-
-        const auto hist_it = token_history->find(seq_id);
-        if (hist_it != token_history->end()) {
-            const auto & hist = hist_it->second;
-            for (auto it = hist.rbegin(); it != hist.rend(); ++it) {
-                if (it->first == pos) {
-                    return it->second;
-                }
-                if (it->first < pos) {
-                    break;
-                }
-            }
-        }
-
-        // Missing lookback positions are zero, matching the previous
-        // _shift_right_ignore_eos behavior.
-        return (llama_token) 0;
-    };
-
-    auto shifted_token_at = [&](int64_t row, llama_seq_id seq_id, llama_pos pos, int32_t shift) {
-        const llama_pos prev_pos = pos - shift;
-        if (prev_pos < 0) {
-            return (llama_token) 0;
-        }
-
-        // HF LongCat _shift_right_ignore_eos shifts within EOS-delimited
-        // segments. The EOS token itself can see earlier tokens in its segment,
-        // but tokens after EOS cannot see the EOS or anything before it.
-        for (llama_pos p = prev_pos; p < pos; ++p) {
-            if (token_at(row, seq_id, p) == eos_token_id) {
-                return (llama_token) 0;
-            }
-        }
-
-        return token_at(row, seq_id, prev_pos);
-    };
-
-    for (int64_t i = 0; i < n_tokens; ++i) {
-        const llama_seq_id seq_id0 = ubatch->seq_id[i][0];
-        const llama_pos pos = ubatch->pos[i];
-        for (int32_t s = 1; s < ubatch->n_seq_id[i]; ++s) {
-            const llama_seq_id seq_id = ubatch->seq_id[i][s];
-            for (int32_t shift = 1; shift < n; ++shift) {
-                GGML_ASSERT(shifted_token_at(i, seq_id, pos, shift) ==
-                    shifted_token_at(i, seq_id0, pos, shift));
-            }
-        }
-    }
-
-    for (int32_t ng = 2; ng <= n; ++ng) {
-        for (int32_t j = 0; j < k; ++j) {
-            const int32_t index = (ng - 2) * k + j;
-            if (index >= (int32_t) ngram_ids.size()) {
-                continue;
-            }
-
-            const int64_t emb_vocab_dim = m + (int64_t) index * 2 + 1;
-
-            std::vector<int64_t> power_mods;
-            int64_t power_mod = 1;
-            for (int32_t p = 0; p < ng - 1; ++p) {
-                power_mod = (power_mod * (int64_t) vocab_size) % emb_vocab_dim;
-                power_mods.push_back(power_mod);
-            }
-
-            std::vector<int32_t> hash_ids(n_tokens);
             for (int64_t i = 0; i < n_tokens; ++i) {
-                GGML_ASSERT(ubatch->n_seq_id[i] > 0);
-
-                // A graph row has one set of n-gram IDs. Coupled sequence rows
-                // must have identical visible history, verified above.
-                const llama_seq_id seq_id = ubatch->seq_id[i][0];
-                const llama_pos pos = ubatch->pos[i];
-
-                int64_t hash = (int64_t) ubatch->token[i];
-                for (int32_t p = 0; p < ng - 1; ++p) {
-                    const llama_token prev = shifted_token_at(i, seq_id, pos, p + 1);
-                    hash += (int64_t) prev * power_mods[p];
+                int64_t hash = ubatch->token[i];
+                int64_t pw   = 1;
+                for (int32_t s = 1; s < ng; ++s) {
+                    pw    = (pw*vocab_size) % emb_vocab;
+                    hash += (int64_t) shifted[i*n_prev + s - 1]*pw;
                 }
-
-                hash_ids[i] = (int32_t) (hash % emb_vocab_dim);
+                ids[i] = (int32_t) (hash % emb_vocab);
             }
 
-            ggml_backend_tensor_set(
-                ngram_ids[index],
-                hash_ids.data(),
-                0,
-                n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(ngram_ids[idx], ids.data(), 0, n_tokens*sizeof(int32_t));
         }
     }
+}
 
-    std::map<llama_seq_id, int32_t> appended;
+bool llm_graph_input_ngram::can_reuse(const llm_graph_params & params) {
+    mctx = dsa ? static_cast<const llama_kv_cache_dsa_context *>(params.mctx)->get_mla() : static_cast<const llama_kv_cache_context *>(params.mctx);
 
-    // Tentatively record this decode by absolute position. Keep the committed
-    // lookback plus the current ubatch rows so a later rollback can remove
-    // rejected rows without losing the tokens immediately before them.
-    for (int64_t i = 0; i < n_tokens; ++i) {
-        for (int32_t s = 0; s < ubatch->n_seq_id[i]; ++s) {
-            const llama_seq_id seq_id = ubatch->seq_id[i][s];
-            const llama_pos pos = ubatch->pos[i];
-            auto & hist = (*token_history)[seq_id];
-
-            while (!hist.empty() && hist.back().first >= pos) {
-                hist.pop_back();
-            }
-            hist.emplace_back(pos, ubatch->token[i]);
-            appended[seq_id]++;
-        }
+    bool res = params.ubatch.token != nullptr;
+    for (const auto * t : ngram_ids) {
+        res &= t->ne[0] == params.ubatch.n_tokens;
     }
 
-    for (const auto & [seq_id, n_appended] : appended) {
-        auto & hist = (*token_history)[seq_id];
-        const int32_t max_history = n - 1 + n_appended;
-        while ((int32_t) hist.size() > max_history) {
-            hist.pop_front();
-        }
-    }
+    return res;
 }
 
 //
@@ -3780,13 +3668,13 @@ ggml_tensor * llm_graph_context::build_attn(
 
     // top_k indexes the cells, and the indexer mask of the same type is built the same way
     // let's use it, so when no other layer reads the MLA mask is not allocated
-    // the LongCat LSA indexer mask carries the sink/local selection bias, so it cannot be reused here
+    // an indexer mask with forced keys carries a +inf bias, so it cannot be reused here
     ggml_tensor * kq_mask = inp->self_attn_mask_mla.raw;
-    if (!inp->longcat_lsa && inp->self_attn_mask_lid.raw->type == kq_mask->type) {
+    if (!inp->forced_keys && inp->self_attn_mask_lid.raw->type == kq_mask->type) {
         kq_mask = inp->self_attn_mask_lid.raw;
     }
 
-    // top_k == nullptr: dense attention over every cell, used by LongCat while n_kv <= indexer top-k
+    // top_k == nullptr: dense attention over every cell, e.g. while n_kv <= indexer top-k
     ggml_tensor * kq_mask_top_k = top_k ? build_top_k_mask(kq_mask, top_k, il) : kq_mask;
 
     ggml_tensor * q = q_cur;
@@ -4037,11 +3925,10 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
      const llama_ubatch & ubatch,
     const llama_hparams & hparams,
     const llama_cparams & cparams,
-    const llama_kv_cache_dsa_context * mctx_cur,
-                    llm_arch   arch) {
+    const llama_kv_cache_dsa_context * mctx_cur) {
 
     auto inp = std::make_unique<llm_graph_input_attn_k_dsa>(hparams, cparams, mctx_cur);
-    inp->longcat_lsa = arch == LLM_ARCH_LONGCAT_FLASH_SPARSE;
+    inp->forced_keys = hparams.indexer_init_tokens + hparams.indexer_local_tokens > 0;
 
     {
         inp->self_k_idxs_mla = mctx_cur->get_mla()->build_input_k_idxs(ctx0, ubatch);
@@ -4053,9 +3940,9 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
         inp->self_k_idxs_lid = mctx_cur->get_lid()->build_input_k_idxs(ctx0, ubatch);
 
         // ensure that mask type matches fused lightning indexer use (requires f16 mask)
-        // the LongCat LSA mask holds +inf sink/local bias, so it stays F32 for the unfused scoring path
+        // a mask with forced keys holds a +inf bias, so it stays F32 for the unfused scoring path
         auto cparams_copy = cparams;
-        cparams_copy.flash_attn = inp->longcat_lsa ? false : cparams.fused_lid;
+        cparams_copy.flash_attn = inp->forced_keys ? false : cparams.fused_lid;
 
         inp->self_attn_mask_lid.raw = build_attn_inp_kq_mask(ctx0, mctx_cur->get_lid(), ubatch, cparams_copy);
 
@@ -4068,7 +3955,7 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
 llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
     const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_context *>(mctx);
 
-    auto inp = build_attn_inp_k_dsa_impl(ctx0, ubatch, hparams, cparams, mctx_cur, model.arch);
+    auto inp = build_attn_inp_k_dsa_impl(ctx0, ubatch, hparams, cparams, mctx_cur);
 
     return (llm_graph_input_attn_k_dsa *) res->add_input(std::move(inp));
 }
@@ -4076,7 +3963,7 @@ llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
 llm_graph_input_attn_k_dsa_iswa * llm_graph_context::build_attn_inp_k_dsa_iswa() const {
     const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_iswa_context *>(mctx);
 
-    auto inp_dsa = build_attn_inp_k_dsa_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_dsa(), model.arch);
+    auto inp_dsa = build_attn_inp_k_dsa_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_dsa());
 
     // build_attn_inp_k_impl rejects SWA caches, so construct the input directly
     auto inp_swa = std::make_unique<llm_graph_input_attn_k>(hparams, cparams, mctx_cur->get_swa());

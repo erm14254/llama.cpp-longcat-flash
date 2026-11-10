@@ -4,10 +4,8 @@
 
 namespace {
 
-// LongCat routes every token to n_expert_used of n_expert real experts plus n_expert_zero identity
-// ("zero") experts. A zero expert returns its input scaled by the routing weight, so it is not part of
-// the expert matmuls: its id is set to -1 (skipped by ggml_mul_mat_id) and its weight is moved to
-// identity_weight.
+// the router also picks n_expert_zero identity ("zero") experts: their ids become -1 (skipped by ggml_mul_mat_id)
+// and their weights are summed into identity_weight, which scales the input instead
 struct longcat_moe_route {
     ggml_tensor * ids;             // I32 [n_expert_used, n_tokens], -1 for zero experts
     ggml_tensor * weights;         // F32 [1, n_expert_used, n_tokens], 0 for zero experts
@@ -62,10 +60,7 @@ void llama_model_longcat_flash_ngram::load_arch_hparams(llama_model_loader & ml)
     ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_MLA,    hparams.n_embd_head_k_mla_impl, false);
     ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA,  hparams.n_embd_head_v_mla_impl, false);
     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all);
-    ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,         hparams.n_expert_shared);
-    ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,        hparams.expert_weights_scale, false);
-    ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,         hparams.expert_weights_norm, false);
-    ml.get_key(LLM_KV_LEADING_DENSE_BLOCK_COUNT,   hparams.n_layer_dense_lead);
+    ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,        hparams.expert_weights_scale);
     ml.get_key(LLM_KV_EXPERT_ZERO_COUNT,           hparams.n_expert_zero, false);
     ml.get_key(LLM_KV_NGRAM_NEIGHBOR_NUM,          hparams.ngram_neighbor_num);
     ml.get_key(LLM_KV_NGRAM_SPLIT_NUM,             hparams.ngram_split_num);
@@ -74,8 +69,6 @@ void llama_model_longcat_flash_ngram::load_arch_hparams(llama_model_loader & ml)
     if (hparams.ngram_neighbor_num < 2 || hparams.ngram_split_num == 0) {
         throw std::runtime_error("invalid n-gram embedding parameters");
     }
-
-    hparams.expert_gating_func = LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX;
 
     if (ml.get_key(LLM_KV_ROPE_SCALING_YARN_LOG_MUL, hparams.rope_yarn_log_mul, false)) {
         // [TAG_DEEPSEEK2_YARN_LOG_MUL_FIX]
@@ -120,7 +113,8 @@ void llama_model_longcat_flash_ngram::load_arch_tensors(llama_model_loader & ml)
         ngram_proj.resize(n_ngram);
 
         for (uint32_t j = 0; j < n_ngram; ++j) {
-            ngram_embd[j] = create_tensor(tn(LLM_TENSOR_NGRAM_EMBD, "weight", j), {n_embd_ngram, ngram_m + 2*j + 1}, 0);
+            // token-indexed like tok_embd, so the tables stay with the input instead of on the device of layer j
+            ngram_embd[j] = create_tensor_input(tn(LLM_TENSOR_NGRAM_EMBD, "weight", j), {n_embd_ngram, ngram_m + 2*j + 1}, 0);
             ngram_proj[j] = create_tensor(tn(LLM_TENSOR_NGRAM_PROJ, "weight", j), {n_embd_ngram, n_embd}, 0);
         }
     }
@@ -152,8 +146,7 @@ void llama_model_longcat_flash_ngram::load_arch_tensors(llama_model_loader & ml)
 
         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, flags);
 
-        // even blocks hold the MoE (routed to on the even block, added on the odd block) and the first
-        // dense MLP of the layer, stored as the shared expert; odd blocks and the NextN block hold one dense MLP
+        // even blocks hold the MoE (output added on the odd block) and a dense MLP stored as the shared expert
         if (!is_nextn && i % 2 == 0) {
             layer.ffn_gate_inp    = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,    "weight", i), {n_embd, n_expert + (int64_t) hparams.n_expert_zero}, flags);
             layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias",   i), {n_expert + (int64_t) hparams.n_expert_zero}, TENSOR_NOT_REQUIRED | flags);
@@ -203,8 +196,6 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
     const bool     use_lsa                 = model.arch == LLM_ARCH_LONGCAT_FLASH_SPARSE;
     const int64_t  n_indexer_head          = hparams.indexer_n_head;
     const int64_t  n_embd_indexer_head     = hparams.indexer_head_size;
-    const int64_t  n_embd_indexer_head_pe  = n_embd_head_qk_rope;
-    const int64_t  n_embd_indexer_head_nope = n_embd_indexer_head - n_embd_indexer_head_pe;
     const uint32_t n_indexer_top_k         = hparams.indexer_top_k;
 
     // the MLA LoRA outputs are scaled by sqrt(n_embd / lora_rank)
@@ -220,17 +211,15 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
     ggml_tensor * cur;
     ggml_tensor * inpL = build_inp_embd(model.tok_embd);
 
-    // n-gram embeddings: hashes of the current and previous tokens index n_ngram extra embedding tables,
-    // each projected to n_embd and added to the token embedding, then the sum is averaged
-    // embeddings passed as input are used as they are
+    // n-gram embeddings: hashes of the token and the ones before it index extra tables, projected and averaged with tok_embd
     if (ubatch.token) {
         const uint32_t n_ngram    = (hparams.ngram_neighbor_num - 1) * hparams.ngram_split_num;
         const int64_t  vocab_size = model.tok_embd->ne[1];
 
         auto inp = std::make_unique<llm_graph_input_ngram>(
-                (int32_t) n_ngram, (int32_t) hparams.ngram_neighbor_num, (int32_t) hparams.ngram_split_num,
+                (int32_t) hparams.ngram_neighbor_num, (int32_t) hparams.ngram_split_num,
                 (int32_t) vocab_size, (int64_t) hparams.ngram_vocab_size_ratio * vocab_size,
-                model.vocab.token_eos(), &res->ngram_token_history);
+                model.vocab.token_eos(), use_lsa, mctx);
 
         inp->ngram_ids.resize(n_ngram);
 
@@ -310,20 +299,9 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
                 indexer_k = ggml_mul(ctx0, indexer_k, model.layers[il].indexer_k_norm);
                 cb(indexer_k, "indexer_k_norm", il);
 
-                ggml_tensor * indexer_k_pe = ggml_view_3d(ctx0, indexer_k,
-                        n_embd_indexer_head_pe, 1, n_tokens,
-                        ggml_row_size(indexer_k->type, n_embd_indexer_head),
-                        ggml_row_size(indexer_k->type, n_embd_indexer_head), 0);
-
-                ggml_tensor * indexer_k_nope = ggml_view_3d(ctx0, indexer_k,
-                        n_embd_indexer_head_nope, 1, n_tokens,
-                        ggml_row_size(indexer_k->type, n_embd_indexer_head),
-                        ggml_row_size(indexer_k->type, n_embd_indexer_head),
-                        ggml_row_size(indexer_k->type, n_embd_indexer_head_pe));
-
-                indexer_k_pe = build_rope_indexer(indexer_k_pe, inp_pos, il);
-
-                indexer_k = ggml_concat(ctx0, indexer_k_pe, indexer_k_nope, 0);
+                // the head is [rope | nope], the RoPE rotates the first n_rot dims and copies the rest
+                indexer_k = ggml_reshape_3d(ctx0, indexer_k, n_embd_indexer_head, 1, n_tokens);
+                indexer_k = build_rope_indexer(indexer_k, inp_pos, il);
                 cb(indexer_k, "indexer_k", il);
 
                 ggml_build_forward_expand(gf, mctx_lid->cpy_k(ctx0, indexer_k, inp_attn_dsa->get_k_idxs_lid(), il));
@@ -335,20 +313,8 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
                     ggml_tensor * indexer_q = ggml_mul_mat(ctx0, model.layers[il].indexer_attn_q_b, q_lora);
                     cb(indexer_q, "indexer_q_b", il);
 
-                    ggml_tensor * indexer_q_pe = ggml_view_3d(ctx0, indexer_q,
-                            n_embd_indexer_head_pe, n_indexer_head, n_tokens,
-                            ggml_row_size(indexer_q->type, n_embd_indexer_head),
-                            ggml_row_size(indexer_q->type, n_embd_indexer_head) * n_indexer_head, 0);
-
-                    ggml_tensor * indexer_q_nope = ggml_view_3d(ctx0, indexer_q,
-                            n_embd_indexer_head_nope, n_indexer_head, n_tokens,
-                            ggml_row_size(indexer_q->type, n_embd_indexer_head),
-                            ggml_row_size(indexer_q->type, n_embd_indexer_head) * n_indexer_head,
-                            ggml_row_size(indexer_q->type, n_embd_indexer_head_pe));
-
-                    indexer_q_pe = build_rope_indexer(indexer_q_pe, inp_pos, il);
-
-                    indexer_q = ggml_concat(ctx0, indexer_q_pe, indexer_q_nope, 0);
+                    indexer_q = ggml_reshape_3d(ctx0, indexer_q, n_embd_indexer_head, n_indexer_head, n_tokens);
+                    indexer_q = build_rope_indexer(indexer_q, inp_pos, il);
                     cb(indexer_q, "indexer_q", il);
 
                     // per-head weights: [n_indexer_head, n_tokens]
@@ -551,8 +517,6 @@ llama_model_longcat_flash_ngram::graph::graph(const llama_model & model, const l
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
-
-    ggml_build_forward_expand(gf, cur);
 }
 
 // NextN/MTP draft head: one dense block (MLA attention without the indexer, dense MLP)

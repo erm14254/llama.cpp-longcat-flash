@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 import re
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 import torch
 
@@ -16,85 +15,48 @@ from .base import ModelBase, TextModel, gguf
 @ModelBase.example("meituan-longcat/LongCat-Flash-Lite")
 class LongcatFlashNgramModel(TextModel):
     model_arch = gguf.MODEL_ARCH.LONGCAT_FLASH_NGRAM
+    supports_mtp_export = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Each logical HF layer has two sub-blocks in the GGUF representation.
-        n_layers = int(
-            self.find_hparam(
-                ["num_layers", "num_hidden_layers", "n_layers", "n_layer"]
-            )
-        )
-        self.base_block_count = 2 * n_layers
-        self.mtp_count = self._detect_mtp_count()
+        # each HF layer holds two attention blocks, stored as two GGUF blocks; the NextN/MTP blocks follow them
+        self.base_block_count = 2 * int(self.find_hparam(["num_layers", "num_hidden_layers", "n_layers", "n_layer"]))
 
-        # LongCat-Flash-Lite currently ships one MTP decoder block. The llama.cpp
-        # MTP runtime also currently expects a single appended NextN block.
-        if self.mtp_count > 1:
-            raise ValueError(
-                "LongCat MTP export currently supports one MTP layer, "
-                f"but found {self.mtp_count}"
-            )
+        mtp_ids = {int(m.group(1)) for name in self.model_tensors if (m := re.match(r"model\.mtp\.layers\.(\d+)\.", name))}
+        if mtp_ids != set(range(len(mtp_ids))):
+            raise ValueError(f"MTP layer ids must be contiguous from 0, found {sorted(mtp_ids)}")
+        if len(mtp_ids) > 1:
+            raise ValueError(f"only one MTP layer is supported, found {len(mtp_ids)}")
+        self.mtp_count = len(mtp_ids)
 
-        # MTP/NextN blocks are stored after the main model blocks.
         self.block_count = self.base_block_count + self.mtp_count
-        self.tensor_map = gguf.get_tensor_name_map(
-            self.model_arch,
-            self.block_count,
-        )
+        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
-    def _detect_mtp_count(self) -> int:
-        """Detect appended LongCat MTP layers from the Safetensors index."""
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        if (titem := super().filter_tensors(item)) is None:
+            return None
+        name, gen = titem
 
-        index_path = self.dir_model / "model.safetensors.index.json"
-        if index_path.exists():
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-            weight_map = index.get("weight_map", {})
+        is_mtp = name.startswith("model.mtp.")
+        if is_mtp and cls.no_mtp:
+            return None
+        if cls.mtp_only and not is_mtp and name not in ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"):
+            return None
 
-            mtp_layer_ids = {
-                int(match.group(1))
-                for name in weight_map
-                if (
-                    match := re.match(
-                        r"model\.mtp\.layers\.(\d+)\.",
-                        name,
-                    )
-                )
-            }
-
-            if mtp_layer_ids:
-                expected_ids = set(range(max(mtp_layer_ids) + 1))
-                if mtp_layer_ids != expected_ids:
-                    raise ValueError(
-                        "LongCat MTP layer IDs must be contiguous from zero; "
-                        f"found {sorted(mtp_layer_ids)}"
-                    )
-                return len(mtp_layer_ids)
-
-            if any(name.startswith("model.mtp.") for name in weight_map):
-                raise ValueError(
-                    "Found LongCat MTP tensors, but no model.mtp.layers.<id> tensors"
-                )
-
-        # The published LongCat-Flash-Lite layout stores MTP tensors in this
-        # auxiliary file. This fallback supports a directory whose index is absent.
-        if (self.dir_model / "model-auxiliary.safetensors").exists():
-            return 1
-
-        return 0
+        return name, gen
 
     def set_vocab(self):
         self._set_vocab_gpt2()
 
-        # The LongCat tokenizer config enables automatic EOS insertion. Disable it
-        # for llama.cpp prompt processing.
+        # the tokenizer config appends EOS automatically, which llama.cpp prompt processing must not do
         self.gguf_writer.add_add_eos_token(False)
 
     def set_gguf_parameters(self):
         hparams = self.hparams
 
-        # MLA is represented as MQA with one compressed KV head in GGUF.
+        # MLA is stored as MQA with one compressed KV head
         hparams["num_key_value_heads"] = 1
 
         super().set_gguf_parameters()
@@ -109,212 +71,110 @@ class LongcatFlashNgramModel(TextModel):
             self.gguf_writer.add_q_lora_rank(hparams["q_lora_rank"])
 
         self.gguf_writer.add_kv_lora_rank(hparams["kv_lora_rank"])
-        self.gguf_writer.add_key_length(
-            hparams["kv_lora_rank"] + hparams["qk_rope_head_dim"]
-        )
+        self.gguf_writer.add_key_length(hparams["kv_lora_rank"] + hparams["qk_rope_head_dim"])
         self.gguf_writer.add_value_length(hparams["kv_lora_rank"])
-        self.gguf_writer.add_key_length_mla(
-            hparams["qk_nope_head_dim"] + hparams["qk_rope_head_dim"]
-        )
+        self.gguf_writer.add_key_length_mla(hparams["qk_nope_head_dim"] + hparams["qk_rope_head_dim"])
         self.gguf_writer.add_value_length_mla(hparams["v_head_dim"])
 
-        self.gguf_writer.add_expert_feed_forward_length(
-            hparams["expert_ffn_hidden_size"]
-        )
+        self.gguf_writer.add_expert_feed_forward_length(hparams["expert_ffn_hidden_size"])
         self.gguf_writer.add_expert_count(hparams["n_routed_experts"])
-        self.gguf_writer.add_expert_shared_count(1)
         self.gguf_writer.add_expert_used_count(hparams["moe_topk"])
-        self.gguf_writer.add_expert_weights_scale(
-            hparams["routed_scaling_factor"]
-        )
+        self.gguf_writer.add_expert_weights_scale(hparams["routed_scaling_factor"])
         self.gguf_writer.add_expert_zero_count(hparams["zero_expert_num"])
-        self.gguf_writer.add_leading_dense_block_count(0)
 
         self.gguf_writer.add_ngram_neighbor_num(hparams["emb_neighbor_num"])
         self.gguf_writer.add_ngram_split_num(hparams["emb_split_num"])
-        self.gguf_writer.add_ngram_vocab_size_ratio(
-            hparams["ngram_vocab_size_ratio"]
-        )
+        self.gguf_writer.add_ngram_vocab_size_ratio(hparams["ngram_vocab_size_ratio"])
 
         self.gguf_writer.add_rope_dimension_count(hparams["qk_rope_head_dim"])
 
-        if (
-            rope_mscale_all := self.rope_parameters.get("mscale_all_dim")
-        ) is not None:
-            self.gguf_writer.add_rope_scaling_yarn_log_mul(
-                0.1 * rope_mscale_all
-            )
+        if (rope_mscale_all := self.rope_parameters.get("mscale_all_dim")) is not None:
+            self.gguf_writer.add_rope_scaling_yarn_log_mul(0.1 * rope_mscale_all)
 
     _experts: list[dict[str, Tensor]] | None = None
 
-    def _remap_double_block(
-        self, name: str, bid: int | None
-    ) -> tuple[str, int | None]:
-        """Map each logical LongCat layer to two GGUF blocks."""
+    def _remap_double_block(self, name: str, bid: int | None) -> tuple[str, int | None]:
+        # the two attention blocks of HF layer i become GGUF blocks 2*i and 2*i + 1; the MoE and the first dense MLP
+        # (stored as the shared expert) go with the even block, the second dense MLP with the odd block
+        if m := re.match(r"model\.layers\.(\d+)\.self_attn\.(\d+)\.(.*)", name):
+            new_bid = 2 * int(m.group(1)) + int(m.group(2))
+            return f"model.layers.{new_bid}.self_attn.{m.group(3)}", new_bid
 
-        match = re.match(
-            r"model\.layers\.(\d+)\.self_attn\.(\d+)\.(.*)", name
-        )
-        if match:
-            new_bid = 2 * int(match.group(1)) + int(match.group(2))
-            return (
-                f"model.layers.{new_bid}.self_attn.{match.group(3)}",
-                new_bid,
-            )
+        if m := re.match(r"model\.layers\.(\d+)\.(input_layernorm|post_attention_layernorm)\.(\d+)\.(.*)", name):
+            new_bid = 2 * int(m.group(1)) + int(m.group(3))
+            return f"model.layers.{new_bid}.{m.group(2)}.{m.group(4)}", new_bid
 
-        match = re.match(
-            r"model\.layers\.(\d+)\."
-            r"(input_layernorm|post_attention_layernorm)\.(\d+)\.(.*)",
-            name,
-        )
-        if match:
-            new_bid = 2 * int(match.group(1)) + int(match.group(3))
-            return (
-                f"model.layers.{new_bid}.{match.group(2)}.{match.group(4)}",
-                new_bid,
-            )
+        if m := re.match(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(.*)", name):
+            new_bid = 2 * int(m.group(1))
+            return f"model.layers.{new_bid}.mlp.experts.{m.group(2)}.{m.group(3)}", new_bid
 
-        match = re.match(
-            r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(.*)", name
-        )
-        if match:
-            new_bid = 2 * int(match.group(1))
-            return (
-                f"model.layers.{new_bid}.mlp.experts."
-                f"{match.group(2)}.{match.group(3)}",
-                new_bid,
-            )
+        if m := re.match(r"model\.layers\.(\d+)\.mlp\.router\.classifier\.(.*)", name):
+            new_bid = 2 * int(m.group(1))
+            return f"model.layers.{new_bid}.mlp.gate.{m.group(2)}", new_bid
 
-        match = re.match(
-            r"model\.layers\.(\d+)\.mlp\.router\.classifier\.(.*)", name
-        )
-        if match:
-            new_bid = 2 * int(match.group(1))
-            return (
-                f"model.layers.{new_bid}.mlp.gate.{match.group(2)}",
-                new_bid,
-            )
+        if m := re.match(r"model\.layers\.(\d+)\.mlp\.router\.e_score_correction(?:_bias|\.bias)", name):
+            new_bid = 2 * int(m.group(1))
+            return f"model.layers.{new_bid}.mlp.gate.e_score_correction.bias", new_bid
 
-        match = re.match(
-            r"model\.layers\.(\d+)\.mlp\.router\."
-            r"e_score_correction(?:_bias|\.bias)",
-            name,
-        )
-        if match:
-            new_bid = 2 * int(match.group(1))
-            return (
-                f"model.layers.{new_bid}.mlp.gate."
-                "e_score_correction.bias",
-                new_bid,
-            )
+        if m := re.match(r"model\.layers\.(\d+)\.mlps\.0\.(.*)", name):
+            new_bid = 2 * int(m.group(1))
+            return f"model.layers.{new_bid}.mlp.shared_experts.{m.group(2)}", new_bid
 
-        match = re.match(r"model\.layers\.(\d+)\.mlps\.0\.(.*)", name)
-        if match:
-            new_bid = 2 * int(match.group(1))
-            return (
-                f"model.layers.{new_bid}.mlp.shared_experts."
-                f"{match.group(2)}",
-                new_bid,
-            )
-
-        match = re.match(r"model\.layers\.(\d+)\.mlps\.1\.(.*)", name)
-        if match:
-            new_bid = 2 * int(match.group(1)) + 1
-            return (
-                f"model.layers.{new_bid}.mlp.{match.group(2)}",
-                new_bid,
-            )
+        if m := re.match(r"model\.layers\.(\d+)\.mlps\.1\.(.*)", name):
+            new_bid = 2 * int(m.group(1)) + 1
+            return f"model.layers.{new_bid}.mlp.{m.group(2)}", new_bid
 
         return name, bid
 
     def _remap_mtp_tensor(self, name: str) -> tuple[str, int]:
-        """Map LongCat's auxiliary MTP tensors to one appended NextN block."""
-
-        if self.mtp_count == 0:
-            raise ValueError(
-                f"Found MTP tensor {name!r}, but no MTP layer was detected"
-            )
-
-        # These tensors live outside model.mtp.layers.0 in the HF checkpoint,
-        # but belong to the first appended MTP block in GGUF.
+        # the MTP embedding and final norm live outside model.mtp.layers.0 but belong to the first NextN block
         mtp_bid = self.base_block_count
         if name == "model.mtp.embed_tokens.weight":
             return f"model.layers.{mtp_bid}.embed_tokens.weight", mtp_bid
         if name == "model.mtp.norm.weight":
             return f"model.layers.{mtp_bid}.shared_head.norm.weight", mtp_bid
 
-        match = re.match(r"model\.mtp\.layers\.(\d+)\.(.*)", name)
-        if not match:
-            raise ValueError(f"Unsupported LongCat MTP tensor: {name}")
+        m = re.match(r"model\.mtp\.layers\.(\d+)\.(.*)", name)
+        if not m:
+            raise ValueError(f"unsupported MTP tensor: {name}")
 
-        mtp_layer_id = int(match.group(1))
-        if mtp_layer_id >= self.mtp_count:
-            raise ValueError(
-                f"MTP tensor {name!r} references layer {mtp_layer_id}, "
-                f"but only {self.mtp_count} layer(s) were detected"
-            )
+        bid = self.base_block_count + int(m.group(1))
+        suffix = m.group(2)
 
-        bid = self.base_block_count + mtp_layer_id
-        suffix = match.group(2)
-
-        # LongCat wraps the MTP FFN in transformer_layer and stores its two
-        # special RMSNorm weights under an extra `.m` module.
+        # the MTP FFN is wrapped in transformer_layer and the two NextN norms in an extra .m module
         if suffix.startswith("transformer_layer.mlp."):
             suffix = suffix.removeprefix("transformer_layer.")
-        elif suffix == "enorm.m.weight":
-            suffix = "enorm.weight"
-        elif suffix == "hnorm.m.weight":
-            suffix = "hnorm.weight"
+        elif suffix in ("enorm.m.weight", "hnorm.m.weight"):
+            suffix = suffix.replace(".m.", ".")
 
         return f"model.layers.{bid}.{suffix}", bid
 
-    def modify_tensors(
-        self, data_torch: Tensor, name: str, bid: int | None
-    ) -> Iterable[tuple[str, Tensor]]:
-        if name.startswith("model.mtp"):
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name.startswith("model.mtp."):
             name, bid = self._remap_mtp_tensor(name)
+        elif "ngram_embeddings" in name:
+            yield from super().modify_tensors(data_torch, name, bid)
+            return
         else:
-            # These names are already handled by the LongCat tensor map.
-            if "ngram_embeddings" in name:
-                yield from super().modify_tensors(data_torch, name, bid)
-                return
-
             name, bid = self._remap_double_block(name, bid)
 
-        # Split the MLA KV-B projection into separate K-B and V-B tensors.
-        # This is required for both the main model and the appended MTP block.
+        # split the MLA kv_b projection into k_b and v_b
         if name.endswith("kv_b_proj.weight"):
-            name_kb = name.replace("kv_b_proj", "k_b_proj")
-            name_vb = name.replace("kv_b_proj", "v_b_proj")
-
-            n_heads = self.hparams["num_attention_heads"]
+            n_head = self.hparams["num_attention_heads"]
             v_head_dim = self.hparams["v_head_dim"]
             qk_nope_head_dim = self.hparams["qk_nope_head_dim"]
 
-            expected = n_heads * (v_head_dim + qk_nope_head_dim)
-            assert data_torch.shape[0] == expected
+            assert data_torch.shape[0] == n_head * (v_head_dim + qk_nope_head_dim)
 
-            kv_b = data_torch.view(
-                n_heads,
-                v_head_dim + qk_nope_head_dim,
-                data_torch.shape[-1],
-            )
-            k_b, v_b = torch.split(
-                kv_b,
-                [qk_nope_head_dim, v_head_dim],
-                dim=1,
-            )
-            k_b = k_b.transpose(1, 2)
+            kv_b = data_torch.view(n_head, v_head_dim + qk_nope_head_dim, data_torch.shape[-1])
+            k_b, v_b = torch.split(kv_b, [qk_nope_head_dim, v_head_dim], dim=1)
 
-            yield from super().modify_tensors(k_b, name_kb, bid)
-            yield from super().modify_tensors(v_b, name_vb, bid)
+            yield from super().modify_tensors(k_b.transpose(1, 2), name.replace("kv_b_proj", "k_b_proj"), bid)
+            yield from super().modify_tensors(v_b, name.replace("kv_b_proj", "v_b_proj"), bid)
             return
 
-        # Merge individual expert weights into llama.cpp's 3-D tensors.
-        if (
-            "mlp.experts" in name
-            and re.search(r"mlp\.experts\.\d+\.", name)
-        ):
+        # merge the routed experts into 3D tensors
+        if re.search(r"mlp\.experts\.\d+\.", name):
             n_experts = self.hparams["n_routed_experts"]
             assert bid is not None
 
@@ -326,25 +186,9 @@ class LongcatFlashNgramModel(TextModel):
             if len(self._experts[bid]) < n_experts * 3:
                 return
 
-            for weight_name in ("down_proj", "gate_proj", "up_proj"):
-                tensors: list[Tensor] = []
-
-                for expert_id in range(n_experts):
-                    expert_name = (
-                        f"model.layers.{bid}.mlp.experts."
-                        f"{expert_id}.{weight_name}.weight"
-                    )
-                    tensors.append(self._experts[bid][expert_name])
-                    del self._experts[bid][expert_name]
-
-                merged = torch.stack(tensors, dim=0)
-                merged_name = (
-                    f"model.layers.{bid}.mlp.experts."
-                    f"{weight_name}.weight"
-                )
-                yield from super().modify_tensors(
-                    merged, merged_name, bid
-                )
+            for w_name in ("down_proj", "gate_proj", "up_proj"):
+                datas = [self._experts[bid].pop(f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight") for xid in range(n_experts)]
+                yield from super().modify_tensors(torch.stack(datas, dim=0), f"model.layers.{bid}.mlp.experts.{w_name}.weight", bid)
             return
 
         yield from super().modify_tensors(data_torch, name, bid)
@@ -353,13 +197,8 @@ class LongcatFlashNgramModel(TextModel):
         super().prepare_tensors()
 
         if self._experts is not None:
-            remaining = [
-                name
-                for block_experts in self._experts
-                for name in block_experts
-            ]
-            if remaining:
-                raise ValueError(f"Unprocessed experts: {remaining}")
+            if remaining := [name for block in self._experts for name in block]:
+                raise ValueError(f"unprocessed experts: {remaining}")
 
 
 @ModelBase.register("LongcatFlashSparseForCausalLM")
@@ -368,16 +207,15 @@ class LongcatFlashSparseModel(LongcatFlashNgramModel):
     model_arch = gguf.MODEL_ARCH.LONGCAT_FLASH_SPARSE
 
     @classmethod
-    def filter_tensors(cls, item):
-        # the original checkpoints name the n-gram tensors oe_embed_*, a save_pretrained round-trip
-        # names them ngram_embeddings.*
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        # the original checkpoints name the n-gram tensors oe_embed_*, a save_pretrained round-trip names them ngram_embeddings.*
         name, gen = item
 
-        if match := re.fullmatch(r"(?:model\.)?oe_embed_tokens(\d+)\.weight", name):
-            name = f"model.ngram_embeddings.embedders.{int(match.group(1))}.weight"
+        if m := re.fullmatch(r"(?:model\.)?oe_embed_tokens(\d+)\.weight", name):
+            name = f"model.ngram_embeddings.embedders.{int(m.group(1))}.weight"
 
-        if match := re.fullmatch(r"(?:model\.)?oe_embed_proj(\d+)\.weight", name):
-            name = f"model.ngram_embeddings.post_projs.{int(match.group(1))}.weight"
+        if m := re.fullmatch(r"(?:model\.)?oe_embed_proj(\d+)\.weight", name):
+            name = f"model.ngram_embeddings.post_projs.{int(m.group(1))}.weight"
 
         return super().filter_tensors((name, gen))
 
@@ -407,7 +245,6 @@ class LongcatFlashSparseModel(LongcatFlashNgramModel):
         self.gguf_writer.add_indexer_top_k(self.hparams["index_topk"])
         self.gguf_writer.add_indexer_init_tokens(self.hparams["index_init_tokens"])
         self.gguf_writer.add_indexer_local_tokens(self.hparams["index_local_tokens"])
-        self.gguf_writer.add_indexer_k_norm_type(self.hparams.get("index_k_norm_type", "rms"))
         # the indexer key norm uses the RMSNorm default eps, not rms_norm_eps
         self.gguf_writer.add_indexer_k_norm_eps(self.hparams.get("index_k_norm_eps", 1e-6))
         self.gguf_writer.add_indexer_rope_interleave(self.hparams["indexer_rope_interleave"])

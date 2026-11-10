@@ -1968,7 +1968,7 @@ void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const 
     }
 }
 
-void llama_kv_cache::set_input_longcat_lsa_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const {
+void llama_kv_cache::set_input_attn_mask_forced_keys(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const {
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
     GGML_ASSERT(!ubatch->is_pos_2d());
@@ -1983,32 +1983,36 @@ void llama_kv_cache::set_input_longcat_lsa_mask(ggml_tensor * dst, const llama_u
     float * data = (float *) dst->data;
     std::fill(data, data + ggml_nelements(dst), -INFINITY);
 
-    // LongCat LSA: the visible cells get 0, the first n_init and the last n_local visible cells (ranked by
-    // position, not by cell index) get +inf so that the indexer top-k always keeps them
-    std::vector<std::pair<llama_pos, uint32_t>> visible;
+    // the visible cells get 0, the first n_init and the last n_local of them (ranked by position) get +inf, so a top-k keeps them
+    // the cells of each sequence are sorted once, the visible cells of a token are the prefix up to its position
+    std::map<llama_seq_id, std::vector<std::pair<llama_pos, uint32_t>>> seq_cells;
 
     for (int64_t i = 0; i < n_tokens; ++i) {
         const llama_seq_id seq_id = ubatch->seq_id[i][0];
         const llama_pos    p1     = ubatch->pos[i];
 
-        const auto & cells = v_cells.at(seq_to_stream[seq_id]);
+        auto it = seq_cells.find(seq_id);
+        if (it == seq_cells.end()) {
+            const auto & cells = v_cells.at(seq_to_stream[seq_id]);
 
-        visible.clear();
-        for (uint32_t j = 0; j < (uint32_t) std::min<int64_t>(n_kv, cells.size()); ++j) {
-            if (cells.is_empty(j) || !cells.seq_has(j, seq_id)) {
-                continue;
+            std::vector<std::pair<llama_pos, uint32_t>> sorted;
+            for (uint32_t j = 0; j < (uint32_t) std::min<int64_t>(n_kv, cells.size()); ++j) {
+                if (!cells.is_empty(j) && cells.seq_has(j, seq_id)) {
+                    sorted.emplace_back(cells.pos_get(j), j);
+                }
             }
-            const llama_pos p0 = cells.pos_get(j);
-            if (causal_attn && p0 > p1) {
-                continue;
-            }
-            visible.emplace_back(p0, j);
+            std::sort(sorted.begin(), sorted.end());
+
+            it = seq_cells.emplace(seq_id, std::move(sorted)).first;
         }
-        std::sort(visible.begin(), visible.end());
+
+        const auto & visible = it->second;
+
+        const size_t n_visible = causal_attn
+            ? (size_t) (std::upper_bound(visible.begin(), visible.end(), std::make_pair(p1, UINT32_MAX)) - visible.begin())
+            : visible.size();
 
         float * row = data + n_kv*i;
-
-        const size_t n_visible = visible.size();
         for (size_t r = 0; r < n_visible; ++r) {
             const bool forced = r < n_init || r + n_local >= n_visible;
             row[visible[r].second] = forced ? INFINITY : 0.0f;
@@ -2042,8 +2046,8 @@ void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch 
 }
 
 bool llama_kv_cache::has_cell_ext() const {
-    // M-RoPE needs the 2D position, the PLE / Engram n-gram hashes need the token id
-    return hparams.n_pos_per_embd() > 1 || hparams.ple_n_heads > 0;
+    // M-RoPE needs the 2D position, the PLE / Engram / LongCat n-gram hashes need the token id
+    return hparams.n_pos_per_embd() > 1 || hparams.ple_n_heads > 0 || hparams.ngram_neighbor_num > 0;
 }
 
 void llama_kv_cache::get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const {
@@ -3137,8 +3141,8 @@ void llama_kv_cache_context::set_input_attn_mask(const llm_attn_mask & attn_mask
     kv->set_input_attn_mask(attn_mask, ubatch, causal_attn);
 }
 
-void llama_kv_cache_context::set_input_longcat_lsa_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const {
-    kv->set_input_longcat_lsa_mask(dst, ubatch, causal_attn, n_init, n_local);
+void llama_kv_cache_context::set_input_attn_mask_forced_keys(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn, uint32_t n_init, uint32_t n_local) const {
+    kv->set_input_attn_mask_forced_keys(dst, ubatch, causal_attn, n_init, n_local);
 }
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {

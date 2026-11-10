@@ -1,7 +1,6 @@
 #include "models.h"
 
-// LongCat-Flash-Sparse is LongCat-Flash-Ngram with a lightning indexer (LSA) on every other layer;
-// the graph is shared, see longcat-flash-ngram.cpp
+// LongCat-Flash-Ngram plus a lightning indexer (LSA), the graph is in longcat-flash-ngram.cpp
 
 void llama_model_longcat_flash_sparse::load_arch_hparams(llama_model_loader & ml) {
     llama_model_longcat_flash_ngram::load_arch_hparams(ml);
@@ -17,11 +16,6 @@ void llama_model_longcat_flash_sparse::load_arch_hparams(llama_model_loader & ml
     // layers that do not own an indexer reuse the top-k of the previous owner
     ml.get_key_or_arr(LLM_KV_ATTENTION_INDEXER_TYPES, hparams.is_indexer_full_impl, hparams.n_layer());
 
-    std::string k_norm_type = "rms";
-    ml.get_key(LLM_KV_ATTENTION_INDEXER_K_NORM_TYPE, k_norm_type, false);
-    if (k_norm_type != "rms") {
-        throw std::runtime_error("unsupported indexer key norm type: " + k_norm_type);
-    }
     if (hparams.n_lora_q == 0) {
         throw std::runtime_error("the indexer requires the Q LoRA");
     }
@@ -51,7 +45,7 @@ void llama_model_longcat_flash_sparse::load_arch_tensors(llama_model_loader & ml
             continue;
         }
 
-        const int flags = is_nextn ? TENSOR_SKIP : 0;
+        const int flags = is_nextn ? (TENSOR_NOT_REQUIRED | TENSOR_SKIP) : 0;
 
         auto & layer = layers[i];
 

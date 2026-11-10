@@ -606,6 +606,8 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const 
         ms.add_kv(LLM_KV_NGRAM_VOCAB_SIZE_RATIO,  uint32_t(2));
     }
     if (arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
+        // a top-k below n_kv so the sparse indexer path runs, at least init + local tokens
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,           uint32_t(16));
         ms.add_kv(LLM_KV_ATTENTION_INDEXER_INIT_TOKENS,     uint32_t(4));
         ms.add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_TOKENS,    uint32_t(8));
         ms.add_kv(LLM_KV_ATTENTION_INDEXER_ROPE_INTERLEAVE, true);
@@ -1151,7 +1153,7 @@ static bool arch_supported(const llm_arch arch) {
     if (arch == LLM_ARCH_LONGCAT_FLASH_NGRAM || arch == LLM_ARCH_LONGCAT_FLASH_SPARSE) {
         return false;
     }
-#endif
+#endif // defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
 
     return true;
 }

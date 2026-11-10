@@ -7,11 +7,9 @@
 
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
 #include <vector>
 #include <memory>
 #include <set>
-#include <utility>
 #include <functional>
 #include <map>
 
@@ -464,7 +462,8 @@ public:
 
     std::vector<ggml_tensor *> self_k_rot_lid;
 
-    bool longcat_lsa = false;
+    // the indexer mask always selects the first indexer_init_tokens and the last indexer_local_tokens visible keys
+    bool forced_keys = false;
 
     const llama_hparams hparams;
     const llama_cparams cparams;
@@ -777,42 +776,33 @@ public:
     std::map<llama_seq_id, llama_sampler *> samplers;
 };
 
-// per-sequence (position, token) history used by the LongCat n-gram embedding hashes
-using llm_ngram_token_history = std::map<llama_seq_id, std::deque<std::pair<llama_pos, llama_token>>>;
-
-// LongCat n-gram embedding input: polynomial rolling hashes of the current and previous tokens,
-// one I32 tensor of row ids per n-gram embedding table
+// LongCat n-gram embedding input: rolling hashes of each token and the tokens before it, one I32 row-id tensor per table
+// the preceding tokens come from the KV cache cells, so they follow seq_rm/seq_cp/seq_add and state save/load
 class llm_graph_input_ngram : public llm_graph_input_i {
 public:
     llm_graph_input_ngram(
-            int32_t n_embedders,    // total embedders: emb_split_num * (emb_neighbor_num - 1)
-            int32_t n_neighbor,     // emb_neighbor_num (e.g. 4)
-            int32_t n_split,        // emb_split_num (e.g. 4)
-            int32_t vocab_size,     // model vocab size
-            int64_t m,              // ngram_vocab_size_ratio * vocab_size
-            int32_t eos_token_id,   // EOS token that terminates n-gram history segments
-            llm_ngram_token_history * token_history) // persistent history (owned by llm_graph_result)
-        : n_embedders(n_embedders)
-        , n_neighbor(n_neighbor)
-        , n_split(n_split)
-        , vocab_size(vocab_size)
-        , m(m)
-        , eos_token_id(eos_token_id)
-        , token_history(token_history) {}
+            int32_t n_neighbor, // tokens per n-gram, including the current one
+            int32_t n_split,    // tables per n-gram size
+            int32_t vocab_size,
+            int64_t m,          // ngram_vocab_size_ratio * vocab_size
+            llama_token eos,    // tokens after an EOS do not see the EOS or anything before it
+            bool dsa,           // the memory is a llama_kv_cache_dsa (LongCat-Flash-Sparse)
+            const llama_memory_context_i * mctx_cur);
     virtual ~llm_graph_input_ngram() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+    bool can_reuse(const llm_graph_params & params) override;
 
-    std::vector<ggml_tensor *> ngram_ids; // I32 [n_tokens] per embedder
+    std::vector<ggml_tensor *> ngram_ids; // I32 [n_tokens] per table
 
-    const int32_t n_embedders;
-    const int32_t n_neighbor;
-    const int32_t n_split;
-    const int32_t vocab_size;
-    const int64_t m;
-    const int32_t eos_token_id;
+    const int32_t     n_neighbor;
+    const int32_t     n_split;
+    const int32_t     vocab_size;
+    const int64_t     m;
+    const llama_token eos;
+    const bool        dsa;
 
-    llm_ngram_token_history * token_history;
+    const llama_kv_cache_context * mctx;
 };
 
 //
@@ -1030,8 +1020,6 @@ public:
     std::vector<llm_graph_fused_node> fused_nodes;
 
     std::map<std::pair<const ggml_tensor *, const ggml_tensor *>, ggml_tensor *> hdmd_inputs;
-    // token history of the LongCat n-gram embedding, kept across graph rebuilds
-    llm_ngram_token_history ngram_token_history;
 
     ggml_context_ptr ctx_compute;
 
