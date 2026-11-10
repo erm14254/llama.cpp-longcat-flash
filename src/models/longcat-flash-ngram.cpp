@@ -640,7 +640,8 @@ llama_model_longcat_flash_ngram::graph_mtp::graph_mtp(const llama_model & model,
     q_nope = ggml_mul_mat(ctx0, layer.wk_b, q_nope);
     q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
 
-    ggml_tensor * Qcur = ggml_concat(ctx0, q_nope, q_pe, 0);
+    // scaled here, in F32, as in the main graph
+    ggml_tensor * Qcur = ggml_scale(ctx0, ggml_concat(ctx0, q_nope, q_pe, 0), kq_scale);
 
     kv_cmpr = ggml_reshape_3d(ctx0, kv_cmpr, kv_lora_rank, 1, n_tokens);
 
@@ -648,7 +649,7 @@ llama_model_longcat_flash_ngram::graph_mtp::graph_mtp(const llama_model & model,
     ggml_tensor * Vcur = kv_cmpr;
 
     cur = build_attn(inp_attn, layer.wo, nullptr, layer.wo_s,
-            Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, kq_scale, il);
+            Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, 1.0f, il);
     cb(cur, "attn_out", il);
 
     ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
