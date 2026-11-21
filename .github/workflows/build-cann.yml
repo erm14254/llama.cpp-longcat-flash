@@ -1,104 +1,635 @@
-name: CI (cann)
+name: Release (Windows - LongCat)
 
 on:
-  workflow_dispatch: # allows manual triggering
+  workflow_dispatch: # 允许手动触发
+    inputs:
+      create_release:
+        description: 'Create new release'
+        required: true
+        type: boolean
   push:
     branches:
-      - master
+      - claude/longcat-win11
     paths: [
-      '.github/workflows/build-cann.yml',
+      '.github/workflows/release.yml',
       '**/CMakeLists.txt',
       '**/.cmake',
       '**/*.h',
       '**/*.hpp',
       '**/*.c',
-      '**/*.cpp'
+      '**/*.cpp',
+      '**/*.cu',
+      '**/*.cuh',
+      '**/*.swift',
+      '**/*.m',
+      '**/*.metal',
+      '**/*.comp',
+      '**/*.glsl'
     ]
-
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths: [
-      '.github/workflows/build-cann.yml',
-      'ggml/src/ggml-cann/**'
-    ]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
-  cancel-in-progress: true
 
 env:
-  GGML_NLOOP: 3
-  GGML_N_THREADS: 1
-  LLAMA_ARG_LOG_COLORS: 1
-  LLAMA_ARG_LOG_PREFIX: 1
-  LLAMA_ARG_LOG_TIMESTAMPS: 1
+  GH_TOKEN: ${{ github.token }}
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
+
+concurrency:
+  group: release
+  queue: max
 
 jobs:
-# TODO: this build is disabled to save Github Actions resources (https://github.com/ggml-org/llama.cpp/pull/23705)
-#       in order to enable it again, we have to provision dedicated runners  to run it
-#  openEuler-latest-cann:
-#    defaults:
-#      run:
-#        shell: bash -el {0}
-#    strategy:
-#      matrix:
-#        arch: [x86, aarch64]
-#        chip_type: ['910b', '310p']
-#        build: ['Release']
-#        use_acl_graph: ['on', 'off']
-#        exclude:
-#          # 310P does not support USE_ACL_GRAPH=on
-#          - chip_type: '310p'
-#            use_acl_graph: 'on'
-#    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-#    steps:
-#      - name: Checkout
-#        uses: actions/checkout@v6
-#        with:
-#          fetch-depth: 0
-#
-#      - name: Free up disk space
-#        uses: ggml-org/free-disk-space@v1.3.1
-#        with:
-#          tool-cache: true
-#
-#      - name: Set container image
-#        id: cann-image
-#        run: |
-#          image="ascendai/cann:${{ matrix.chip_type == '910b' &&  '8.5.0-910b-openeuler24.03-py3.11' || '8.5.0-310p-openeuler24.03-py3.11' }}"
-#          echo "image=${image}" >> "${GITHUB_OUTPUT}"
-#
-#      - name: Pull container image
-#        run: docker pull "${{ steps.cann-image.outputs.image }}"
-#
-#      - name: Build
-#        env:
-#          BUILD_TYPE: ${{ matrix.build }}
-#          SOC_TYPE: ascend${{ matrix.chip_type }}
-#          USE_ACL_GRAPH: ${{ matrix.use_acl_graph }}
-#        run: |
-#          HOST_UID=$(id -u)
-#          HOST_GID=$(id -g)
-#
-#          docker run --rm \
-#            -v "${PWD}:/workspace" \
-#            -w /workspace \
-#            -e SOC_TYPE=${SOC_TYPE} \
-#            -e BUILD_TYPE=${BUILD_TYPE} \
-#            -e USE_ACL_GRAPH=${USE_ACL_GRAPH} \
-#            "${{ steps.cann-image.outputs.image }}" \
-#            bash -lc '
-#              set -e
-#              yum install -y --setopt=install_weak_deps=False --setopt=tsflags=nodocs git gcc gcc-c++ make cmake openssl-devel
-#              yum clean all && rm -rf /var/cache/yum
-#              git config --global --add safe.directory "/workspace"
-#              export LD_LIBRARY_PATH=${ASCEND_TOOLKIT_HOME}/lib64:${ASCEND_TOOLKIT_HOME}/$(uname -m)-linux/devlib/:${LD_LIBRARY_PATH}
-#              cmake -S . -B build \
-#                  -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
-#                  -DGGML_CANN=on \
-#                  -DSOC_TYPE=${SOC_TYPE} \
-#                  -DUSE_ACL_GRAPH=${USE_ACL_GRAPH}
-#              cmake --build build -j $(nproc)
-#
-#              chown -R '"${HOST_UID}"':'"${HOST_GID}"' /workspace/build
-#            '
+  check-release:
+    runs-on: ubuntu-slim
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - id: check
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/claude/longcat-win11" ]]; then
+            if echo "$COMMIT_MESSAGE" | grep -q '\[no release\]'; then
+              echo "should_release=false" >> $GITHUB_OUTPUT
+            else
+              echo "should_release=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+  get-version:
+    runs-on: ubuntu-slim
+    outputs:
+      ui_version: ${{ steps.version.outputs.ui_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: version
+        run: |
+          version=""
+          if grep -q "BUILD_NUMBER" cmake/build-info.cmake; then
+            build_number=$(grep "set(BUILD_NUMBER" cmake/build-info.cmake | grep -oP '\d+')
+            if [ -n "$build_number" ] && [ "$build_number" -gt 0 ]; then
+              version="b${build_number}"
+            fi
+          fi
+          if [ -z "$version" ]; then
+            version=$(git rev-parse --short HEAD)-$(date +%s)
+          fi
+          echo "ui_version=${version}" >> $GITHUB_OUTPUT
+
+  # ---------- Windows 构建作业 ----------
+
+  windows-cpu:
+    needs: [check-release]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2025-vs2026
+    permissions:
+      actions: write
+    strategy:
+      matrix:
+        include:
+          - arch: 'x64'
+          - arch: 'arm64'
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+      - name: Install Ninja
+        run: choco install ninja
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: release-windows-2025-vs2026-${{ matrix.arch }}-cpu
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch == 'x64' && 'x64' || 'amd64_arm64' }}
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -D CMAKE_TOOLCHAIN_FILE=cmake/${{ matrix.arch }}-windows-llvm.cmake ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=${{ matrix.arch == 'x64' && 'ON' || 'OFF' }} ^
+            -DGGML_OPENMP=ON ^
+            ${{ env.CMAKE_ARGS }}
+          cmake --build build --config Release
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: release-windows-2025-vs2026-${{ matrix.arch }}-cpu
+      - name: Pack artifacts
+        run: |
+          Copy-Item "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Redist\MSVC\14.51.36231\debug_nonredist\${{ matrix.arch }}\Microsoft.VC145.OpenMP.LLVM\libomp140.${{ matrix.arch == 'x64' && 'x86_64' || 'aarch64' }}.dll" .\build\bin\Release\
+          7z a -snl llama-bin-win-cpu-${{ matrix.arch }}.zip .\build\bin\Release\*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-cpu-${{ matrix.arch }}.zip
+          name: llama-bin-win-cpu-${{ matrix.arch }}.zip
+
+  windows-cuda:
+    name: windows-cuda (${{ matrix.cuda }}, ${{ matrix.arch }})
+    needs: [check-release]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2022
+    permissions:
+      actions: write
+    strategy:
+      matrix:
+        include:
+          - cuda: '12.4'
+            arch: x64
+            defines: '-DGGML_CUDA_CUB_3DOT2=ON'
+          - cuda: '13.3'
+            arch: x64
+            defines: ''
+          - cuda: '13.4'
+            arch: arm64
+            defines: '-DCMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-msvc-cuda.cmake'
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+      - name: Install Cuda Toolkit
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: ${{ matrix.cuda }}
+          cuda_arch: ${{ matrix.arch }}
+      - name: Install Ninja
+        run: choco install ninja
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: release-windows-2022-${{ matrix.arch }}-cuda-${{ matrix.cuda }}
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch == 'x64' && 'x64' || 'amd64_arm64' }}
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CPU=OFF ^
+            -DGGML_CUDA=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ${{ matrix.defines }}
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: release-windows-2022-${{ matrix.arch }}-cuda-${{ matrix.cuda }}
+      - name: Pack artifacts
+        run: |
+          7z a -snl llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip .\build\bin\Release\ggml-cuda.dll
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip
+          name: llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip
+      - name: Copy and pack Cuda runtime (x64)
+        if: ${{ matrix.arch == 'x64' }}
+        run: |
+          echo "Cuda install location: ${{ env.CUDA_PATH }}"
+          $dst='.\build\bin\cudart\'
+          robocopy "${{env.CUDA_PATH}}\bin" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          robocopy "${{env.CUDA_PATH}}\lib" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          robocopy "${{env.CUDA_PATH}}\bin\x64" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          7z a cudart-llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip $dst\*
+      - name: Copy and pack Cuda runtime (ARM64)
+        if: ${{ matrix.arch == 'arm64' }}
+        run: |
+          echo "Cuda install location: ${{ env.CUDA_PATH }}"
+          $dst='.\build\bin\cudart\'
+          robocopy "${{env.CUDA_PATH}}\bin\arm64" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          7z a cudart-llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip $dst\*
+      - name: Upload Cuda runtime
+        uses: actions/upload-artifact@v6
+        with:
+          path: cudart-llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip
+          name: cudart-llama-bin-win-cuda-${{ matrix.cuda }}-${{ matrix.arch }}.zip
+
+  windows-vulkan:
+    needs: [check-release]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2025
+    permissions:
+      actions: write
+    env:
+      VULKAN_VERSION: 1.4.357.0
+    strategy:
+      matrix:
+        include:
+          - backend: 'vulkan'
+            arch: 'x64'
+            defines: '-DGGML_VULKAN=ON'
+            target: 'ggml-vulkan'
+          - backend: 'opencl-adreno'
+            arch: 'arm64'
+            defines: '-G "Ninja Multi-Config" -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-arm64-release" -DGGML_OPENCL=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON'
+            target: 'ggml-opencl'
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+      - name: Install Vulkan SDK
+        if: ${{ matrix.backend == 'vulkan' }}
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+      - name: Install Ninja
+        run: choco install ninja
+      - name: Install OpenCL Headers and Libs
+        if: ${{ matrix.backend == 'opencl-adreno' && matrix.arch == 'arm64' }}
+        run: |
+          git clone https://github.com/KhronosGroup/OpenCL-Headers
+          cd OpenCL-Headers
+          cmake -B build `
+            -DBUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_TESTING=OFF `
+            -DOPENCL_HEADERS_BUILD_CXX_TESTS=OFF `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl-arm64-release"
+          cmake --build build --target install
+          git clone https://github.com/KhronosGroup/OpenCL-ICD-Loader
+          cd OpenCL-ICD-Loader
+          cmake -B build-arm64-release `
+            -A arm64 `
+            -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-arm64-release" `
+            -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP/opencl-arm64-release"
+          cmake --build build-arm64-release --target install --config release
+      - name: Build
+        run: |
+          cmake -S . -B build ${{ matrix.defines }} -DGGML_NATIVE=OFF -DGGML_CPU=OFF -DGGML_BACKEND_DL=ON -DLLAMA_BUILD_BORINGSSL=ON
+          cmake --build build --config Release --target ${{ matrix.target }}
+      - name: Pack artifacts
+        run: |
+          7z a -snl llama-bin-win-${{ matrix.backend }}-${{ matrix.arch }}.zip .\build\bin\Release\${{ matrix.target }}.dll
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-${{ matrix.backend }}-${{ matrix.arch }}.zip
+          name: llama-bin-win-${{ matrix.backend }}-${{ matrix.arch }}.zip
+
+  windows-openvino:
+    needs: [check-release]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2022
+    outputs:
+      openvino_version: ${{ steps.openvino_version.outputs.value }}
+    env:
+      OPENVINO_VERSION_MAJOR: "2026.2.1"
+      OPENVINO_VERSION_FULL: "2026.2.1.21919.ede283a88e3"
+    steps:
+      - name: Set OpenVINO version output
+        id: openvino_version
+        shell: bash
+        run: echo "value=${{ env.OPENVINO_VERSION_MAJOR }}" >> $GITHUB_OUTPUT
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: release-windows-2022-openvino
+          variant: ccache
+          evict-old-files: 1d
+      - name: Setup Cache
+        uses: actions/cache@v5
+        id: cache-openvino
+        with:
+          path: ./openvino_toolkit
+          key: cache-gha-openvino-toolkit-v${{ env.OPENVINO_VERSION_FULL }}-${{ runner.os }}
+      - name: Setup OpenVINO Toolkit
+        if: steps.cache-openvino.outputs.cache-hit != 'true'
+        uses: ./.github/actions/windows-setup-openvino
+        with:
+          path: ./openvino_toolkit
+          version_major: ${{ env.OPENVINO_VERSION_MAJOR }}
+          version_full: ${{ env.OPENVINO_VERSION_FULL }}
+      - name: Install OpenCL using vcpkg
+        shell: powershell
+        run: |
+          git clone https://github.com/microsoft/vcpkg C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+          C:\vcpkg\vcpkg install opencl
+      - name: Build
+        shell: cmd
+        run: |
+          for /d %%i in (openvino_toolkit\*) do set OPENVINO_ROOT=%%i
+          if not exist "%OPENVINO_ROOT%\runtime\cmake\OpenVINOConfig.cmake" (
+              echo ERROR: OpenVINOConfig.cmake not found
+              exit /b 1
+          )
+          call "%OPENVINO_ROOT%\setupvars.bat"
+          cmake -B build\ReleaseOV -G "Visual Studio 17 2022" ^
+            -A x64 ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_OPENVINO=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+            ${{ env.CMAKE_ARGS }}
+          cmake --build build\ReleaseOV --config Release -- /m
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: release-windows-2022-openvino
+      - name: Pack artifacts
+        shell: powershell
+        run: |
+          $OPENVINO_ROOT = (Get-ChildItem -Directory openvino_toolkit | Select-Object -First 1).FullName
+          if (-not $OPENVINO_ROOT) { Write-Error "OpenVINO toolkit folder not found"; exit 1 }
+          $dest = ".\build\ReleaseOV\bin\Release"
+          $ovBin = Join-Path $OPENVINO_ROOT 'runtime\bin\intel64\Release'
+          Copy-Item -Path (Join-Path $ovBin '*.dll') -Destination $dest -Force
+          Copy-Item -Path (Join-Path $ovBin 'cache.json') -Destination $dest -Force
+          $tbbBin = Join-Path $OPENVINO_ROOT 'runtime\3rdparty\tbb\bin'
+          Copy-Item -Path (Join-Path $tbbBin 'tbb*.dll') -Destination $dest -Force
+          $licensingDest = Join-Path $dest 'openvino-licensing'
+          New-Item -ItemType Directory -Force -Path $licensingDest | Out-Null
+          Copy-Item -Path (Join-Path $OPENVINO_ROOT 'docs\licensing\*') -Destination $licensingDest -Recurse -Force
+          Copy-Item LICENSE $dest
+          7z a -snl llama-bin-win-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.zip $dest\*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.zip
+          name: llama-bin-win-openvino-${{ env.OPENVINO_VERSION_MAJOR }}-x64.zip
+
+  windows-rocm:
+    needs: [check-release]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        include:
+          - ROCM_VERSION: "7.14.0"
+            gpu_targets: "gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201"
+            build: x64
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-rocm-${{ matrix.ROCM_VERSION }}-${{ matrix.build }}
+          evict-old-files: 1d
+      - name: Setup ROCm
+        uses: ./.github/actions/windows-setup-rocm
+        with:
+          version: ${{ matrix.ROCM_VERSION }}
+      - name: Setup ROCm Environment
+        run: |
+          $ErrorActionPreference = "Stop"
+          & C:\TheRock\build\.venv\Scripts\Activate.ps1
+          rocm-sdk init
+          if ($LASTEXITCODE -ne 0) { throw "rocm-sdk init failed" }
+          $rocmPath = (rocm-sdk path --root).Trim()
+          $cmakePath = (rocm-sdk path --cmake).Trim()
+          $binPath = (rocm-sdk path --bin).Trim()
+          echo "HIP_PATH=$rocmPath" >> $env:GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$cmakePath" >> $env:GITHUB_ENV
+          echo "HIP_DEVICE_LIB_PATH=$rocmPath\lib\llvm\amdgcn\bitcode" >> $env:GITHUB_ENV
+          echo "HIP_PLATFORM=amd" >> $env:GITHUB_ENV
+          echo "LLVM_PATH=$rocmPath\lib\llvm" >> $env:GITHUB_ENV
+          echo "$binPath" >> $env:GITHUB_PATH
+          echo "C:\TheRock\build\.venv\Scripts" >> $env:GITHUB_PATH
+      - name: Build
+        run: |
+          mkdir build
+          cd build
+          cmake .. `
+            -G "Unix Makefiles" `
+            -DCMAKE_PREFIX_PATH="${env:HIP_PATH}" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_BACKEND_DL=ON `
+            -DGGML_NATIVE=OFF `
+            -DGGML_CPU=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_HIP=ON `
+            -DCMAKE_C_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
+            -DCMAKE_CXX_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang++.exe" `
+            -DCMAKE_C_FLAGS="-Wno-error=incompatible-pointer-types" `
+            -DCMAKE_HIP_COMPILER="${env:HIP_PATH}\lib\llvm\bin\clang.exe" `
+            -DHIP_PATH="${env:HIP_PATH}" `
+            -DGGML_HIP_ROCWMMA_FATTN=ON `
+            -DAMDGPU_TARGETS="${{ matrix.gpu_targets }}"
+          cmake --build . --config Release --parallel ${env:NUMBER_OF_PROCESSORS}
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: windows-rocm-${{ matrix.ROCM_VERSION }}-${{ matrix.build }}
+      - name: Verify HIP backend was built
+        run: |
+          $hipDll = Get-ChildItem -Path build\bin -Filter "ggml-hip*.dll" -ErrorAction SilentlyContinue
+          if (-not $hipDll) {
+            Write-Host "##[error]ggml-hip*.dll was NOT produced."
+            Get-ChildItem build\bin | Format-Table -AutoSize
+            exit 1
+          }
+      - name: Pack artifacts
+        run: |
+          $rocmVersionShort = ('${{ matrix.ROCM_VERSION }}'.Split('.')[0..1] -join '.')
+          echo "ROCM_VERSION_SHORT=$rocmVersionShort" >> $env:GITHUB_ENV
+          cp "LICENSE" "build\bin\"
+          7z a -snl llama-bin-win-rocm-${{ env.ROCM_VERSION_SHORT }}-${{ matrix.build }}.zip .\build\bin\*
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-rocm-${{ env.ROCM_VERSION_SHORT }}-${{ matrix.build }}.zip
+          name: llama-bin-win-rocm-${{ env.ROCM_VERSION_SHORT }}-${{ matrix.build }}.zip
+
+  windows-sycl:
+    needs: [check-release]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    env:
+      WINDOWS_BASEKIT_URL: https://registrationcenter-download.intel.com/akdlm/IRC_NAS/b60765d1-2b85-4e85-86b6-cb0e9563a699/intel-deep-learning-essentials-2025.3.3.18_offline.exe
+      WINDOWS_DPCPP_MKL: intel.oneapi.win.cpp-dpcpp-common:intel.oneapi.win.mkl.devel:intel.oneapi.win.dnnl:intel.oneapi.win.tbb.devel
+      LEVEL_ZERO_SDK_URL: https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero-win-sdk-1.28.2.zip
+      ONEAPI_ROOT: "C:/Program Files (x86)/Intel/oneAPI"
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+      - name: Download & Install oneAPI
+        run: scripts/install-oneapi.bat $WINDOWS_BASEKIT_URL $WINDOWS_DPCPP_MKL
+      - name: Install Level Zero SDK
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ env.LEVEL_ZERO_SDK_URL }}" -OutFile "level-zero-win-sdk.zip"
+          Expand-Archive -Path "level-zero-win-sdk.zip" -DestinationPath "C:/level-zero-sdk" -Force
+          "LEVEL_ZERO_V1_SDK_PATH=C:/level-zero-sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "tools/ui/package-lock.json"
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: release-windows-2022-x64-sycl
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64 --force
+          cmake -G "Ninja" -B build ^
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=icx ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_BACKEND_DL=ON -DBUILD_SHARED_LIBS=ON ^
+            -DGGML_CPU=OFF -DGGML_SYCL=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON
+          cmake --build build --target ggml-sycl -j %NUMBER_OF_PROCESSORS%
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: release-windows-2022-x64-sycl
+      - name: Build the release package
+        run: |
+          cp "${{ env.ONEAPI_ROOT }}/mkl/latest/bin/mkl_sycl_blas.5.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/mkl/latest/bin/mkl_core.2.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/mkl/latest/bin/mkl_tbb_thread.2.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_adapter_level_zero.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_adapter_level_zero_v2.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_adapter_opencl.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_loader.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_win_proxy_loader.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/sycl8.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/svml_dispmd.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libmmd.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libiomp5md.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/sycl-ls.exe" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libsycl-fallback-bfloat16.spv" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libsycl-native-bfloat16.spv" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/dnnl/latest/bin/dnnl.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/tbb/latest/bin/tbb12.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/tcm/latest/bin/tcm.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/tcm/latest/bin/libhwloc-15.dll" ./build/bin
+          cp "${{ env.ONEAPI_ROOT }}/umf/latest/bin/umf.dll" ./build/bin
+          7z a -snl llama-bin-win-sycl-x64.zip ./build/bin/*
+      - name: Upload the release package
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-sycl-x64.zip
+          name: llama-bin-win-sycl-x64.zip
+
+  # ---------- 发布作业 ----------
+
+  release:
+    if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/claude/longcat-win11' ) || github.event.inputs.create_release == 'true' }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-slim
+    needs:
+      - get-version
+      - windows-cpu
+      - windows-cuda
+      - windows-vulkan
+      - windows-openvino
+      - windows-rocm
+      - windows-sycl
+    outputs:
+      tag_name: ${{ steps.tag.outputs.name }}
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Determine tag name
+        id: tag
+        uses: ./.github/actions/get-tag-name
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: ./artifact
+          merge-multiple: true
+      - name: Move artifacts
+        run: |
+          mkdir -p release
+          for arch in x64 arm64; do
+            cpu_zip="artifact/llama-bin-win-cpu-${arch}.zip"
+            temp_dir=$(mktemp -d)
+            unzip "$cpu_zip" -d "$temp_dir"
+            for target_zip in artifact/llama-bin-win-*-${arch}.zip; do
+              if [[ "$target_zip" == "$cpu_zip" ]]; then continue; fi
+              realpath_target_zip=$(realpath "$target_zip")
+              (cd "$temp_dir" && zip -r "$realpath_target_zip" .)
+            done
+            rm -rf "$temp_dir"
+          done
+          for zip_file in artifact/llama-bin-win-*.zip; do
+            base_name=$(basename "$zip_file" .zip)
+            zip_name="llama-${{ steps.tag.outputs.name }}-${base_name#llama-}.zip"
+            mv "$zip_file" "release/$zip_name"
+          done
+          mv -v artifact/*.zip release 2>/dev/null || true
+          mv -v artifact/*.tar.gz release 2>/dev/null || true
+      - name: Create release
+        id: create_release
+        uses: ggml-org/action-create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          body: |
+            **Windows 构建（LongCat 分支）**
+            - Windows x64 (CPU)
+            - Windows arm64 (CPU)
+            - Windows x64 (CUDA 12.4 / 13.3)
+            - Windows arm64 (CUDA 13.4 preview)
+            - Windows x64 (Vulkan)
+            - Windows arm64 (OpenCL Adreno)
+            - Windows x64 (OpenVINO)
+            - Windows x64 (ROCm 7.14)
+            - Windows x64 (SYCL)
+      - name: Upload release
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const path = require('path');
+            const fs = require('fs');
+            const release_id = '${{ steps.create_release.outputs.id }}';
+            for (let file of await fs.readdirSync('./release')) {
+              if (path.extname(file) === '.zip' || file.endsWith('.tar.gz')) {
+                console.log('uploadReleaseAsset', file);
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release_id,
+                  name: file,
+                  data: await fs.readFileSync(`./release/${file}`)
+                });
+              }
+            }
